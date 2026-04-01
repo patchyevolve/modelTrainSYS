@@ -192,6 +192,9 @@ class SmartUpgradeSystem:
 
         system_msg = """You are an expert Python/ML engineer. Analyze the project context and suggest upgrades.
 
+IMPORTANT: Only suggest changes where the new_code does NOT already exist in the project!
+Skip any improvements that are already implemented.
+
 Return ONLY valid JSON array (no markdown, no prose):
 [
   {
@@ -199,8 +202,8 @@ Return ONLY valid JSON array (no markdown, no prose):
     "function": "function_name or null",
     "issue": "brief description of what to fix/improve",
     "reasoning": "why this upgrade helps",
-    "current_code": "exact code to replace (string with \\n)",
-    "new_code": "replacement code (string with \\n)",
+    "current_code": "exact code to replace (string with \\n) - must exist exactly in file",
+    "new_code": "replacement code (string with \\n) - must NOT already exist in project",
     "verify": "what to check to confirm it works"
   }
 ]
@@ -212,7 +215,10 @@ Focus on:
 4. Missing imports or exports
 5. Consistency across files
 
-Keep suggestions concrete and verifiable. Only suggest changes that will definitely improve the code."""
+CRITICAL: 
+- new_code must be NEW code that does NOT exist anywhere in the project
+- If code similar to your suggestion exists, skip it
+- Only suggest truly new improvements"""
 
         user_msg = f"""Project context:
 {project_context}
@@ -239,9 +245,10 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
                 hashlib.sha256(user_msg.encode()).hexdigest()[:16],
                 json.dumps(suggestions), ttl_seconds=1800)
 
-            self._suggestions = suggestions
-            self._emit(f"Got {len(suggestions)} upgrade suggestions")
-            return suggestions
+            filtered = self._filter_duplicate_suggestions(suggestions)
+            self._suggestions = filtered
+            self._emit(f"Got {len(filtered)} unique upgrade suggestions (filtered {len(suggestions) - len(filtered)} duplicates)")
+            return filtered
 
         except json.JSONDecodeError as e:
             self._emit(f"Failed to parse LLM response: {e}", "error")
@@ -249,6 +256,43 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
         except Exception as e:
             self._emit(f"LLM query failed: {e}", "error")
             return []
+
+    def _filter_duplicate_suggestions(self, suggestions: List[Dict]) -> List[Dict]:
+        """Filter out suggestions where new_code already exists in project."""
+        filtered = []
+        for s in suggestions:
+            new_code = s.get('new_code', '')
+            if not new_code:
+                self._emit(f"Skipping - no new_code: {s.get('issue', '')[:50]}", "warn")
+                continue
+
+            if self._code_exists_in_project(new_code):
+                self._emit(f"Skipping duplicate - already exists: {s.get('file', '')}", "warn")
+                continue
+
+            filtered.append(s)
+
+        if len(filtered) < len(suggestions):
+            self._emit(f"Filtered {len(suggestions) - len(filtered)} duplicate suggestions")
+
+        return filtered
+
+    def _code_exists_in_project(self, code: str) -> bool:
+        """Check if code already exists in any project file."""
+        code_stripped = code.strip()
+        if len(code_stripped) < 20:
+            return False
+
+        for py_file in self.project_root.rglob("*.py"):
+            if any(ignored in py_file.parts for ignored in self.analyzer.ignored_dirs):
+                continue
+            try:
+                content = py_file.read_text(encoding='utf-8', errors='ignore')
+                if code_stripped in content:
+                    return True
+            except Exception:
+                continue
+        return False
 
     def apply_upgrade(self, suggestion: Dict) -> Tuple[bool, str]:
         """Apply a single upgrade - exact match only."""
