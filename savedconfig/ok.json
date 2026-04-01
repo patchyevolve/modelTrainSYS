@@ -1,0 +1,12 @@
+{
+  "model_type": "Mamba+Transformer",
+  "optimizer": "Adam",
+  "scheduler": "CosineAnnealing",
+  "epochs": 50,
+  "batch_size": 32,
+  "hidden_dim": 512,
+  "num_layers": 3,
+  "num_heads": 8,
+  "lr": 0.001,
+  "reflector": true
+}
