@@ -230,6 +230,8 @@ REQUIRED_FILES = [
     ("implementations.py",   "HMT backbone — Mamba + Transformer"),
     ("reflector_trainer.py", "Reflector + LLM reflector + trainer"),
     ("auto_upgrade.py",      "Self-upgrade system + SQLite DB"),
+    ("project_context.py",    "Project file context storage"),
+    ("smart_upgrade.py",     "Smart upgrade with full project analysis"),
     ("trainer.py",           "Cybersecurity adversarial trainer"),
     ("chat.py",              "System CLI interface"),
     ("training_ui.py",       "Visual training GUI"),
@@ -387,6 +389,15 @@ def _cmd_upgrade():
     root.mainloop()
 
 
+def _cmd_smart_upgrade():
+    from smart_upgrade import quick_upgrade
+    print(cyan("\n  Running Smart Upgrade..."))
+    result = quick_upgrade()
+    print(green(f"\n  Applied {result.get('applied_count', 0)} upgrades"))
+    stats = result.get('groq_stats', {})
+    print(dim(f"  API calls: {stats.get('total_calls', 0)}, Cache hits: {stats.get('cache_hits', 0)}\n"))
+
+
 def _cmd_install():
     import subprocess
     pkgs = ["torch", "torchvision", "numpy", "pandas", "Pillow", "tkinterdnd2"]
@@ -422,6 +433,9 @@ if __name__ == "__main__":
 
     elif flag in ("upgrade", "upg"):
         _cmd_upgrade()
+
+    elif flag in ("smart-upgrade", "smart"):
+        _cmd_smart_upgrade()
 
     elif flag in ("list", "list-models", "models"):
         print_models()

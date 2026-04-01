@@ -1,17 +1,16 @@
 """
 Auto-Upgrade System Window
-Standalone tkinter Toplevel — can be opened from training_ui.py or start.py
-Shows: live log, DB upgrade history, model snapshots, LLM conversation, controls
+Standalone tkinter Toplevel with SmartUpgradeSystem integration.
+Shows: live log, project files, upgrade history, code diffs, controls.
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, scrolledtext
 import threading
 import json
 from datetime import datetime
 from pathlib import Path
 
-# ── palette (matches training_ui) ────────────────────────────────────────────
 BG_DARK   = "#0d1117"
 BG_PANEL  = "#161b22"
 BG_CARD   = "#1c2128"
@@ -46,161 +45,161 @@ def _accent_btn(parent, text, cmd, width=16):
 
 
 class AutoUpgradeWindow(tk.Toplevel):
-    """
-    Dedicated window for the Auto-Upgrade System.
-    Pass an AutoUpgradeSystem instance (or None for DB-only view).
-    """
-
     def __init__(self, parent, upgrade_system=None):
         super().__init__(parent)
+        self.smart_upgrade = None
         self.upgrade_system = upgrade_system
-        self.title("Auto-Upgrade System")
+        self.title("Smart Upgrade System")
         self.configure(bg=BG_DARK)
-        self.geometry("1100x720")
-        self.minsize(900, 600)
+        self.geometry("1200x800")
+        self.minsize(1000, 600)
         self._build()
         self._refresh_all()
 
+    def _get_smart_system(self):
+        if self.smart_upgrade:
+            return self.smart_upgrade
+        
+        from smart_upgrade import SmartUpgradeSystem
+        self.smart_upgrade = SmartUpgradeSystem()
+        self.smart_upgrade.set_log_callback(self._on_log)
+        return self.smart_upgrade
+
     def _get_db(self):
-        """
-        Get UpgradeDB — works in all launch modes because auto_upgrade.py
-        now handles its own imports without needing package context.
-        """
-        import sys
-        # 1. Prefer the already-loaded module (fastest, avoids re-exec)
-        for key in ("mlsystem.core.auto_upgrade", "auto_upgrade",
-                    "auto_upgrade_direct"):
-            mod = sys.modules.get(key)
-            if mod and hasattr(mod, "UpgradeDB"):
-                return mod.UpgradeDB()
-
-        # 2. Live system has a db object directly
-        if self.upgrade_system and hasattr(self.upgrade_system, "db"):
-            return self.upgrade_system.db
-
-        # 3. Direct import — now works because relative imports are guarded
-        import importlib.util
-        from pathlib import Path
-        spec = importlib.util.spec_from_file_location(
-            "auto_upgrade_direct",
-            Path(__file__).parent / "auto_upgrade.py"
-        )
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["auto_upgrade_direct"] = mod
-        spec.loader.exec_module(mod)
-        return mod.UpgradeDB()
-
-    # ── Layout ────────────────────────────────────────────────────────────────
+        try:
+            from project_context import ProjectFileDB
+            return ProjectFileDB()
+        except ImportError:
+            return None
 
     def _build(self):
-        # Title bar
         bar = tk.Frame(self, bg=BG_PANEL, height=46)
         bar.pack(fill="x")
         bar.pack_propagate(False)
-        _label(bar, "⚙  Auto-Upgrade System", fg=TEXT_PRI, bg=BG_PANEL,
+        _label(bar, "Smart Upgrade System", fg=TEXT_PRI, bg=BG_PANEL,
                font=("Segoe UI", 12, "bold")).pack(side="left", padx=14, pady=10)
-        _label(bar, "Groq llama-3.3-70b-versatile  ·  SQLite DB",
-               fg=TEXT_SEC, bg=BG_PANEL, font=("Segoe UI", 8)).pack(
-            side="left", pady=10)
-        # Show whether a live system is attached
-        sys_status = "● Live system attached" if self.upgrade_system else "○ DB view only — launch via start.py --ui for live upgrades"
-        sys_color  = TEXT_OK if self.upgrade_system else TEXT_WARN
-        _label(bar, sys_status, fg=sys_color, bg=BG_PANEL,
-               font=("Segoe UI", 8)).pack(side="right", padx=14, pady=10)
+        _label(bar, "Full Project Analysis  ·  LLM Caching  ·  Per-File Context",
+               fg=TEXT_SEC, bg=BG_PANEL, font=("Segoe UI", 8)).pack(side="left", pady=10)
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
 
-        # Control row
         ctrl = tk.Frame(self, bg=BG_DARK)
         ctrl.pack(fill="x", padx=12, pady=8)
 
-        self.run_btn = _accent_btn(ctrl, "▶  Run Upgrade Cycle", self._run_cycle, width=20)
-        self.run_btn.pack(side="left", padx=(0, 8))
+        self.run_btn = _accent_btn(ctrl, "Run Full Upgrade", self._run_cycle, width=18)
+        self.run_btn.pack(side="left", padx=(0, 6))
 
-        _btn(ctrl, "Analyze Only", self._analyze_only, width=14).pack(side="left", padx=(0, 8))
-        _btn(ctrl, "⟳ Refresh DB", self._refresh_all, width=14).pack(side="left", padx=(0, 8))
-        _btn(ctrl, "Clear Log", self._clear_log, width=12).pack(side="left")
+        _btn(ctrl, "Analyze Project", self._analyze_project, width=14).pack(side="left", padx=(0, 6))
+        _btn(ctrl, "Query LLM", self._query_llm, width=12).pack(side="left", padx=(0, 6))
+        _btn(ctrl, "Refresh", self._refresh_all, width=10).pack(side="left", padx=(0, 6))
+        _btn(ctrl, "Clear", self._clear_log, width=8).pack(side="left")
 
-        self.status_lbl = _label(ctrl, "Ready", fg=TEXT_SEC, bg=BG_DARK,
-                                  font=("Segoe UI", 9))
+        self.status_lbl = _label(ctrl, "Ready", fg=TEXT_SEC, bg=BG_DARK, font=("Segoe UI", 9))
         self.status_lbl.pack(side="right", padx=8)
 
-        # Stat cards
         cards_row = tk.Frame(self, bg=BG_DARK)
         cards_row.pack(fill="x", padx=12, pady=(0, 8))
         self._stat_vars = {}
         for i, (title, key) in enumerate([
-            ("Attempted", "attempted"), ("Successful", "successful"),
-            ("Success Rate", "rate"), ("DB Records", "db_records"),
+            ("Files", "files"), ("Upgrades", "upgrades"),
+            ("Success", "success"), ("API Calls", "api_calls"),
         ]):
-            card = tk.Frame(cards_row, bg=BG_CARD,
-                            highlightbackground=BORDER, highlightthickness=1)
+            card = tk.Frame(cards_row, bg=BG_CARD, highlightbackground=BORDER, highlightthickness=1)
             card.grid(row=0, column=i, padx=4, sticky="ew")
             cards_row.columnconfigure(i, weight=1)
-            _label(card, title, fg=TEXT_SEC, bg=BG_CARD,
-                   font=("Segoe UI", 7, "bold")).pack(pady=(6, 0))
+            _label(card, title, fg=TEXT_SEC, bg=BG_CARD, font=("Segoe UI", 7, "bold")).pack(pady=(6, 0))
             v = tk.StringVar(value="—")
             self._stat_vars[key] = v
-            color = {
-                "attempted": TEXT_PRI, "successful": TEXT_OK,
-                "rate": ACCENT2, "db_records": TEXT_WARN,
-            }[key]
-            _label(card, "", fg=color, bg=BG_CARD,
-                   font=("Segoe UI", 13, "bold"),
-                   textvariable=v).pack(pady=(0, 6))
+            colors = {"files": ACCENT2, "upgrades": TEXT_PRI, "success": TEXT_OK, "api_calls": TEXT_WARN}
+            _label(card, "", fg=colors[key], bg=BG_CARD, font=("Segoe UI", 13, "bold"), textvariable=v).pack(pady=(0, 6))
 
-        # Notebook tabs
         style = ttk.Style()
         style.theme_use("clam")
         style.configure("Dark.TNotebook", background=BG_DARK, borderwidth=0)
-        style.configure("Dark.TNotebook.Tab", background=BG_INPUT,
-                        foreground=TEXT_SEC, padding=[12, 5],
-                        font=("Segoe UI", 9))
-        style.map("Dark.TNotebook.Tab",
-                  background=[("selected", BG_CARD)],
-                  foreground=[("selected", TEXT_PRI)])
+        style.configure("Dark.TNotebook.Tab", background=BG_INPUT, foreground=TEXT_SEC, padding=[12, 5], font=("Segoe UI", 9))
+        style.map("Dark.TNotebook.Tab", background=[("selected", BG_CARD)], foreground=[("selected", TEXT_PRI)])
 
         nb = ttk.Notebook(self, style="Dark.TNotebook")
         nb.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
         self._build_log_tab(nb)
+        self._build_files_tab(nb)
+        self._build_suggestions_tab(nb)
         self._build_history_tab(nb)
-        self._build_snapshots_tab(nb)
-        self._build_llm_tab(nb)
-        self._build_modifications_tab(nb)
-
-    # ── Tab: Live Log ─────────────────────────────────────────────────────────
+        self._build_diff_tab(nb)
 
     def _build_log_tab(self, nb):
         frame = tk.Frame(nb, bg=BG_CARD)
         nb.add(frame, text="  Live Log  ")
-        self.log_text = tk.Text(frame, bg=BG_CARD, fg=TEXT_PRI,
-                                font=("Consolas", 9), relief="flat",
-                                state="disabled", wrap="word")
+        self.log_text = tk.Text(frame, bg=BG_CARD, fg=TEXT_PRI, font=("Consolas", 9), relief="flat", state="disabled", wrap="word")
         sb = ttk.Scrollbar(frame, orient="vertical", command=self.log_text.yview)
         self.log_text.config(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
-        self.log_text.tag_config("ok",   foreground=TEXT_OK)
+        self.log_text.tag_config("ok", foreground=TEXT_OK)
         self.log_text.tag_config("warn", foreground=TEXT_WARN)
-        self.log_text.tag_config("err",  foreground=TEXT_ERR)
+        self.log_text.tag_config("err", foreground=TEXT_ERR)
         self.log_text.tag_config("info", foreground=ACCENT2)
 
-    # ── Tab: Upgrade History ──────────────────────────────────────────────────
+    def _build_files_tab(self, nb):
+        frame = tk.Frame(nb, bg=BG_CARD)
+        nb.add(frame, text="  Project Files  ")
+        
+        toolbar = tk.Frame(frame, bg=BG_CARD)
+        toolbar.pack(fill="x", padx=4, pady=4)
+        _btn(toolbar, "Analyze All", self._analyze_project, width=12).pack(side="left", padx=2)
+        _btn(toolbar, "View Context", self._view_file_context, width=12).pack(side="left", padx=2)
+        
+        cols = ("File", "Classes", "Functions", "Lines", "Last Analyzed")
+        self.files_tree = ttk.Treeview(frame, columns=cols, show="headings", height=20)
+        self.files_tree.configure(style="Hist.Treeview")
+        widths = {"File": 250, "Classes": 80, "Functions": 80, "Lines": 60, "Last Analyzed": 150}
+        for col in cols:
+            self.files_tree.heading(col, text=col)
+            self.files_tree.column(col, width=widths[col], anchor="w")
+        sb = ttk.Scrollbar(frame, orient="vertical", command=self.files_tree.yview)
+        self.files_tree.config(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.files_tree.pack(fill="both", expand=True, padx=4, pady=4)
+        self.files_tree.bind("<Double-Button-1>", lambda e: self._view_file_context())
+
+    def _build_suggestions_tab(self, nb):
+        frame = tk.Frame(nb, bg=BG_CARD)
+        nb.add(frame, text="  Suggestions  ")
+        
+        toolbar = tk.Frame(frame, bg=BG_CARD)
+        toolbar.pack(fill="x", padx=4, pady=4)
+        self.apply_sel_btn = _btn(toolbar, "Apply Selected", self._apply_selected, width=14)
+        self.apply_sel_btn.pack(side="left", padx=2)
+        _btn(toolbar, "Apply All", self._apply_all, width=10).pack(side="left", padx=2)
+        _btn(toolbar, "Discard All", self._discard_all, width=10).pack(side="left", padx=2)
+        
+        cols = ("#", "File", "Function", "Issue", "Status")
+        self.sugg_tree = ttk.Treeview(frame, columns=cols, show="headings", height=12)
+        self.sugg_tree.configure(style="Hist.Treeview")
+        widths = {"#": 30, "File": 150, "Function": 120, "Issue": 350, "Status": 80}
+        for col in cols:
+            self.sugg_tree.heading(col, text=col)
+            self.sugg_tree.column(col, width=widths[col], anchor="w")
+        sb = ttk.Scrollbar(frame, orient="vertical", command=self.sugg_tree.yview)
+        self.sugg_tree.config(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.sugg_tree.pack(fill="both", expand=True, padx=4, pady=4)
+        self.sugg_tree.bind("<Double-Button-1>", lambda e: self._view_suggestion_diff())
+
+        detail = tk.Frame(frame, bg=BG_CARD)
+        detail.pack(fill="x", padx=4, pady=4)
+        _label(detail, "Details:", fg=TEXT_SEC, bg=BG_CARD, font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        self.sugg_detail = scrolledtext.ScrolledText(detail, bg=BG_INPUT, fg=TEXT_PRI, font=("Consolas", 8), height=10)
+        self.sugg_detail.pack(fill="x")
+        self.sugg_tree.bind("<<TreeviewSelect>>", self._on_sugg_select)
 
     def _build_history_tab(self, nb):
         frame = tk.Frame(nb, bg=BG_CARD)
         nb.add(frame, text="  Upgrade History  ")
-        cols = ("ID", "Time", "Type", "Description", "Status", "Score Before", "Score After")
+        cols = ("ID", "Time", "File", "Function", "Status", "Reasoning")
         self.hist_tree = ttk.Treeview(frame, columns=cols, show="headings", height=18)
-        style = ttk.Style()
-        style.configure("Hist.Treeview", background=BG_CARD, foreground=TEXT_PRI,
-                        fieldbackground=BG_CARD, font=("Segoe UI", 8))
-        style.configure("Hist.Treeview.Heading", background=BG_INPUT,
-                        foreground=TEXT_SEC, font=("Segoe UI", 8, "bold"))
-        style.map("Hist.Treeview", background=[("selected", ACCENT2)])
         self.hist_tree.configure(style="Hist.Treeview")
-        widths = {"ID": 40, "Time": 130, "Type": 140, "Description": 260,
-                  "Status": 70, "Score Before": 90, "Score After": 90}
+        widths = {"ID": 40, "Time": 130, "File": 150, "Function": 120, "Status": 80, "Reasoning": 300}
         for col in cols:
             self.hist_tree.heading(col, text=col)
             self.hist_tree.column(col, width=widths[col], anchor="w")
@@ -208,229 +207,275 @@ class AutoUpgradeWindow(tk.Toplevel):
         self.hist_tree.config(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self.hist_tree.pack(fill="both", expand=True, padx=4, pady=4)
-        self.hist_tree.tag_configure("success", foreground=TEXT_OK)
-        self.hist_tree.tag_configure("failed",  foreground=TEXT_ERR)
+        self.hist_tree.tag_configure("applied", foreground=TEXT_OK)
+        self.hist_tree.tag_configure("failed", foreground=TEXT_ERR)
         self.hist_tree.tag_configure("pending", foreground=TEXT_WARN)
+        self.hist_tree.tag_configure("reverted", foreground=TEXT_SEC)
 
-    # ── Tab: Model Snapshots ──────────────────────────────────────────────────
+        btn_row = tk.Frame(frame, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=4, pady=4)
+        _btn(btn_row, "Revert Selected", self._revert_selected, width=14).pack(side="left", padx=2)
 
-    def _build_snapshots_tab(self, nb):
+    def _build_diff_tab(self, nb):
         frame = tk.Frame(nb, bg=BG_CARD)
-        nb.add(frame, text="  Model Snapshots  ")
-        cols = ("ID", "Time", "Label", "Params", "Notes")
-        self.snap_tree = ttk.Treeview(frame, columns=cols, show="headings", height=18)
-        self.snap_tree.configure(style="Hist.Treeview")
-        for col, w in zip(cols, [40, 140, 120, 90, 400]):
-            self.snap_tree.heading(col, text=col)
-            self.snap_tree.column(col, width=w, anchor="w")
-        sb = ttk.Scrollbar(frame, orient="vertical", command=self.snap_tree.yview)
-        self.snap_tree.config(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.snap_tree.pack(fill="both", expand=True, padx=4, pady=4)
-
-    # ── Tab: LLM Conversation ─────────────────────────────────────────────────
-
-    def _build_llm_tab(self, nb):
-        frame = tk.Frame(nb, bg=BG_CARD)
-        nb.add(frame, text="  LLM Conversation  ")
-        self.llm_text = tk.Text(frame, bg=BG_CARD, fg=TEXT_PRI,
-                                font=("Consolas", 8), relief="flat",
-                                state="disabled", wrap="word")
-        sb = ttk.Scrollbar(frame, orient="vertical", command=self.llm_text.yview)
-        self.llm_text.config(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.llm_text.pack(fill="both", expand=True, padx=6, pady=6)
-        self.llm_text.tag_config("user",      foreground=ACCENT2)
-        self.llm_text.tag_config("assistant", foreground=TEXT_OK)
-        self.llm_text.tag_config("ts",        foreground=TEXT_SEC)
-
-    # ── Tab: Self-Modifications ───────────────────────────────────────────────
-
-    def _build_modifications_tab(self, nb):
-        frame = tk.Frame(nb, bg=BG_CARD)
-        nb.add(frame, text="  Self-Modifications  ")
-        cols = ("ID", "Time", "File", "Function", "Applied", "Reason")
-        self.mod_tree = ttk.Treeview(frame, columns=cols, show="headings", height=10)
-        self.mod_tree.configure(style="Hist.Treeview")
-        for col, w in zip(cols, [40, 140, 100, 120, 60, 340]):
-            self.mod_tree.heading(col, text=col)
-            self.mod_tree.column(col, width=w, anchor="w")
-        sb = ttk.Scrollbar(frame, orient="vertical", command=self.mod_tree.yview)
-        self.mod_tree.config(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.mod_tree.pack(fill="both", expand=True, padx=4, pady=4)
-
-        # Detail pane
-        detail_frame = tk.Frame(frame, bg=BG_CARD)
-        detail_frame.pack(fill="x", padx=4, pady=(0, 4))
-        _label(detail_frame, "New Code:", fg=TEXT_SEC, bg=BG_CARD,
-               font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=4)
-        self.mod_code = tk.Text(detail_frame, bg=BG_INPUT, fg=TEXT_PRI,
-                                font=("Consolas", 8), relief="flat", height=8)
-        self.mod_code.pack(fill="x", padx=4, pady=(0, 4))
-        self.mod_tree.bind("<<TreeviewSelect>>", self._on_mod_select)
-        self.mod_tree.tag_configure("applied",   foreground=TEXT_OK)
-        self.mod_tree.tag_configure("unapplied", foreground=TEXT_WARN)
-
-    # ── Actions ───────────────────────────────────────────────────────────────
+        nb.add(frame, text="  Code Diff  ")
+        
+        self.diff_text = scrolledtext.ScrolledText(frame, bg=BG_INPUT, fg=TEXT_PRI, font=("Consolas", 9), wrap="none")
+        self.diff_text.pack(fill="both", expand=True, padx=4, pady=4)
+        self.diff_text.tag_configure("old", foreground=TEXT_ERR, background="#2d1f1f")
+        self.diff_text.tag_configure("new", foreground=TEXT_OK, background="#1f2d1f")
+        self.diff_text.tag_configure("header", foreground=TEXT_WARN)
 
     def _run_cycle(self):
-        if not self.upgrade_system:
-            self._log(
-                "No live upgrade system — launch via: python start.py --ui\n"
-                "DB history is still viewable in the tabs above.", "warn")
-            return
         self.run_btn.config(state="disabled")
-        self._set_status("Running upgrade cycle…", TEXT_WARN)
-        self.upgrade_system.set_log_callback(self._on_upgrade_log)
+        self._set_status("Running...", TEXT_WARN)
+        self._log("Starting full upgrade cycle...")
 
         def _worker():
             try:
-                summary = self.upgrade_system.run_full_cycle()
-                self.after(0, self._on_cycle_done, summary)
+                system = self._get_smart_system()
+                result = system.run_full_upgrade_cycle(max_upgrades=5, auto_apply=False)
+                self.after(0, self._on_cycle_done, result)
             except Exception as e:
                 self.after(0, self._on_cycle_error, str(e))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _analyze_only(self):
-        if not self.upgrade_system:
-            self._log(
-                "No live upgrade system — launch via: python start.py --ui", "warn")
-            return
-        self._set_status("Analyzing…", TEXT_WARN)
+    def _analyze_project(self):
+        self._set_status("Analyzing...", TEXT_WARN)
+        self._log("Analyzing project files...")
 
         def _worker():
             try:
-                report = self.upgrade_system.analyze_performance()
-                self.after(0, self._log,
-                    f"Analysis complete — score: {report.get('overall_score',0):.1f}/100\n"
-                    f"Bottlenecks: {len(report.get('bottlenecks',[]))}\n"
-                    f"Opportunities: {len(report.get('opportunities',[]))}\n"
-                    f"Params: {report.get('param_count',0):,}", "info")
-                self.after(0, self._set_status, "Analysis done", TEXT_OK)
+                system = self._get_smart_system()
+                result = system.analyze_project()
+                self.after(0, self._on_analyze_done, result)
             except Exception as e:
-                self.after(0, self._log, f"Analysis error: {e}", "err")
-                self.after(0, self._set_status, "Error", TEXT_ERR)
+                self.after(0, self._on_cycle_error, str(e))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_cycle_done(self, summary):
+    def _query_llm(self):
+        self._set_status("Querying LLM...", TEXT_WARN)
+        self._log("Querying LLM for upgrades...")
+
+        def _worker():
+            try:
+                system = self._get_smart_system()
+                suggestions = system.query_for_upgrades(max_upgrades=5)
+                self.after(0, self._on_suggestions, suggestions)
+            except Exception as e:
+                self.after(0, self._on_cycle_error, str(e))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_cycle_done(self, result):
         self.run_btn.config(state="normal")
-        self._set_status(
-            f"Done — {summary['applied']}/{summary['fetched']} applied", TEXT_OK)
+        applied = result.get('applied_count', 0)
+        total = len(result.get('suggestions', []))
+        self._set_status(f"Done: {applied}/{total} suggestions", TEXT_OK)
+        self._log(f"Cycle complete: {applied}/{total} upgrades applied")
         self._refresh_all()
+
+    def _on_analyze_done(self, result):
+        self._set_status(f"Analyzed: {result['files_analyzed']} files", TEXT_OK)
+        self._log(f"Analysis complete: {result['files_analyzed']} files, {result['total_files']} total")
+        self._refresh_files()
+
+    def _on_suggestions(self, suggestions):
+        self._set_status(f"Got {len(suggestions)} suggestions", TEXT_OK)
+        self._log(f"Received {len(suggestions)} upgrade suggestions")
+        self._refresh_suggestions(suggestions)
 
     def _on_cycle_error(self, err):
         self.run_btn.config(state="normal")
-        self._log(f"Cycle error: {err}", "err")
+        self._log(f"Error: {err}", "err")
         self._set_status("Error", TEXT_ERR)
 
-    def _on_upgrade_log(self, msg: str, level: str = "info"):
+    def _on_log(self, msg: str, level: str = "info"):
         self.after(0, self._log, msg, level)
 
-    def _clear_log(self):
-        self.log_text.config(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.config(state="disabled")
-
-    # ── Refresh DB views ──────────────────────────────────────────────────────
-
-    def _refresh_all(self):
-        try:
-            db = self._get_db()
-            self._refresh_history(db)
-            self._refresh_snapshots(db)
-            self._refresh_llm(db)
-            self._refresh_modifications(db)
-            self._refresh_stats(db)
-        except Exception as e:
-            self._log(f"DB refresh error: {e}", "err")
-
-    def _refresh_history(self, db):
-        self.hist_tree.delete(*self.hist_tree.get_children())
-        for row in db.get_recent_upgrades(100):
-            ts   = row["ts"][:19] if row["ts"] else ""
-            pb   = f"{row['perf_before']:.1f}" if row["perf_before"] else "—"
-            pa   = f"{row['perf_after']:.1f}"  if row["perf_after"]  else "—"
-            tag  = row["status"] if row["status"] in ("success","failed","pending") else "pending"
-            self.hist_tree.insert("", "end", tags=(tag,),
-                values=(row["id"], ts, row["upgrade_type"],
-                        (row["description"] or "")[:60], row["status"], pb, pa))
-
-    def _refresh_snapshots(self, db):
-        self.snap_tree.delete(*self.snap_tree.get_children())
-        for row in db.get_snapshots(50):
-            ts = row["ts"][:19] if row["ts"] else ""
-            self.snap_tree.insert("", "end",
-                values=(row["id"], ts, row["label"],
-                        f"{row['param_count']:,}" if row["param_count"] else "—",
-                        (row["notes"] or "")[:80]))
-
-    def _refresh_llm(self, db):
-        self.llm_text.config(state="normal")
-        self.llm_text.delete("1.0", "end")
-        for row in db.get_conversation(60):
-            ts   = row["ts"][:19] if row["ts"] else ""
-            role = row["role"]
-            tag  = "user" if role == "user" else "assistant"
-            self.llm_text.insert("end", f"[{ts}] ", "ts")
-            self.llm_text.insert("end", f"{role.upper()}\n", tag)
-            self.llm_text.insert("end", row["content"][:600] + "\n\n")
-        self.llm_text.see("end")
-        self.llm_text.config(state="disabled")
-
-    def _refresh_modifications(self, db):
-        self.mod_tree.delete(*self.mod_tree.get_children())
-        for row in db.get_modifications():
-            ts  = row["ts"][:19] if row["ts"] else ""
-            app = "✓" if row["applied"] else "○"
-            tag = "applied" if row["applied"] else "unapplied"
-            self.mod_tree.insert("", "end", iid=str(row["id"]), tags=(tag,),
-                values=(row["id"], ts, row["target_file"],
-                        row["function_name"], app,
-                        (row["reason"] or "")[:60]))
-
-    def _refresh_stats(self, db):
-        rows = db.get_recent_upgrades(1000)
-        total    = len(rows)
-        success  = sum(1 for r in rows if r["status"] == "success")
-        rate     = f"{success/max(1,total)*100:.0f}%"
-        self._stat_vars["attempted"].set(str(total))
-        self._stat_vars["successful"].set(str(success))
-        self._stat_vars["rate"].set(rate)
-        self._stat_vars["db_records"].set(str(total))
-        if self.upgrade_system:
-            s = self.upgrade_system.get_upgrade_status()
-            self._stat_vars["attempted"].set(str(s["attempted"]))
-            self._stat_vars["successful"].set(str(s["successful"]))
-            self._stat_vars["rate"].set(f"{s['success_rate']*100:.0f}%")
-
-    def _on_mod_select(self, _=None):
-        sel = self.mod_tree.selection()
-        if not sel:
-            return
-        try:
-            db   = self._get_db()
-            rows = db.get_modifications()
-            row  = next((r for r in rows if str(r["id"]) == sel[0]), None)
-            if row:
-                self.mod_code.config(state="normal")
-                self.mod_code.delete("1.0", "end")
-                self.mod_code.insert("end", row["new_code"] or "")
-                self.mod_code.config(state="disabled")
-        except Exception:
-            pass
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
     def _log(self, msg: str, level: str = ""):
-        ts   = datetime.now().strftime("%H:%M:%S")
+        ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}\n"
         self.log_text.config(state="normal")
         self.log_text.insert("end", line, level)
         self.log_text.see("end")
         self.log_text.config(state="disabled")
 
+    def _clear_log(self):
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.config(state="disabled")
+
     def _set_status(self, msg: str, color: str = TEXT_SEC):
         self.status_lbl.config(text=msg, fg=color)
+
+    def _refresh_all(self):
+        self._refresh_files()
+        self._refresh_history()
+        self._refresh_stats()
+
+    def _refresh_files(self):
+        self.files_tree.delete(*self.files_tree.get_children())
+        db = self._get_db()
+        if not db:
+            return
+        
+        for ctx in db.get_all_contexts():
+            ast_s = json.loads(ctx.get('ast_summary', '{}'))
+            ts = ctx.get('last_analyzed', '')[:19] if ctx.get('last_analyzed') else 'Never'
+            self.files_tree.insert("", "end", values=(
+                ctx.get('file_path', ''),
+                len(ast_s.get('classes', [])),
+                len(ast_s.get('functions', [])),
+                ast_s.get('total_lines', 0),
+                ts
+            ))
+
+    def _refresh_suggestions(self, suggestions):
+        self.sugg_tree.delete(*self.sugg_tree.get_children())
+        for i, s in enumerate(suggestions):
+            self.sugg_tree.insert("", "end", iid=str(i), values=(
+                i + 1,
+                s.get('file', ''),
+                s.get('function', 'N/A'),
+                s.get('issue', '')[:60],
+                "Pending"
+            ))
+
+    def _refresh_history(self):
+        self.hist_tree.delete(*self.hist_tree.get_children())
+        db = self._get_db()
+        if not db:
+            return
+        
+        for row in db.get_upgrade_history(limit=100):
+            ts = row.get('applied_at', '')[:19] if row.get('applied_at') else ''
+            status = row.get('status', 'pending')
+            reasoning = (row.get('llm_reasoning', '') or '')[:50]
+            self.hist_tree.insert("", "end", tags=(status,), values=(
+                row.get('id', ''),
+                ts,
+                row.get('file_path', ''),
+                row.get('function_name', ''),
+                status,
+                reasoning
+            ))
+
+    def _refresh_stats(self):
+        db = self._get_db()
+        system = self._get_smart_system()
+        
+        if db:
+            contexts = db.get_all_contexts()
+            history = db.get_upgrade_history()
+            self._stat_vars["files"].set(str(len(contexts)))
+            self._stat_vars["upgrades"].set(str(len(history)))
+            self._stat_vars["success"].set(str(sum(1 for h in history if h.get('status') == 'applied')))
+        
+        if system:
+            stats = system.groq.get_stats()
+            self._stat_vars["api_calls"].set(str(stats.get('total_calls', 0)))
+
+    def _view_file_context(self):
+        sel = self.files_tree.selection()
+        if not sel:
+            return
+        item = self.files_tree.item(sel[0])
+        file_path = item['values'][0]
+        
+        db = self._get_db()
+        if db:
+            ctx = db.get_file_context(file_path)
+            if ctx:
+                self.diff_text.delete("1.0", "end")
+                self.diff_text.insert("end", f"# {file_path}\n\n", "header")
+                ast_s = json.loads(ctx.get('ast_summary', '{}'))
+                
+                self.diff_text.insert("end", f"## Classes ({len(ast_s.get('classes', []))})\n")
+                for cls in ast_s.get('classes', []):
+                    self.diff_text.insert("end", f"  {cls.get('name', '')}\n")
+                
+                self.diff_text.insert("end", f"\n## Functions ({len(ast_s.get('functions', []))})\n")
+                for fn in ast_s.get('functions', [])[:15]:
+                    args = ', '.join(fn.get('args', [])[:3])
+                    self.diff_text.insert("end", f"  {fn.get('name', '')}({args})\n")
+                
+                self.diff_text.insert("end", f"\n## Imports\n")
+                for imp in json.loads(ctx.get('imports', '[]'))[:20]:
+                    self.diff_text.insert("end", f"  {imp}\n")
+
+    def _on_sugg_select(self, _=None):
+        sel = self.sugg_tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if hasattr(self, '_current_suggestions') and idx < len(self._current_suggestions):
+            s = self._current_suggestions[idx]
+            self.sugg_detail.delete("1.0", "end")
+            self.sugg_detail.insert("end", f"File: {s.get('file', '')}\n")
+            self.sugg_detail.insert("end", f"Function: {s.get('function', 'N/A')}\n")
+            self.sugg_detail.insert("end", f"Reasoning: {s.get('reasoning', '')}\n\n")
+            self.sugg_detail.insert("end", "---\nOLD CODE:\n", "old")
+            self.sugg_detail.insert("end", s.get('current_code', 'N/A') + "\n\n")
+            self.sugg_detail.insert("end", "---\nNEW CODE:\n", "new")
+            self.sugg_detail.insert("end", s.get('new_code', 'N/A'))
+
+    def _view_suggestion_diff(self):
+        sel = self.sugg_tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if hasattr(self, '_current_suggestions') and idx < len(self._current_suggestions):
+            s = self._current_suggestions[idx]
+            self.diff_text.delete("1.0", "end")
+            self.diff_text.insert("end", f"# {s.get('file', '')} - {s.get('function', 'N/A')}\n\n", "header")
+            self.diff_text.insert("end", f"# Issue: {s.get('issue', '')}\n\n", "header")
+            self.diff_text.insert("end", "-- OLD --\n", "old")
+            self.diff_text.insert("end", s.get('current_code', 'N/A') + "\n\n")
+            self.diff_text.insert("end", "-- NEW --\n", "new")
+            self.diff_text.insert("end", s.get('new_code', 'N/A'))
+
+    def _apply_selected(self):
+        sel = self.sugg_tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if hasattr(self, '_current_suggestions') and idx < len(self._current_suggestions):
+            s = self._current_suggestions[idx]
+            system = self._get_smart_system()
+            ok, msg = system.apply_upgrade(s)
+            if ok:
+                self._log(f"Applied upgrade to {s.get('file', '')}")
+                self._refresh_history()
+            else:
+                self._log(f"Failed: {msg}", "err")
+
+    def _apply_all(self):
+        if hasattr(self, '_current_suggestions'):
+            system = self._get_smart_system()
+            for s in self._current_suggestions:
+                ok, msg = system.apply_upgrade(s)
+                status = "OK" if ok else f"FAIL: {msg}"
+                self._log(f"{s.get('file', '')}: {status}")
+            self._refresh_history()
+
+    def _discard_all(self):
+        self._current_suggestions = []
+        self.sugg_tree.delete(*self.sugg_tree.get_children())
+        self._log("Discarded all suggestions")
+
+    def _revert_selected(self):
+        sel = self.hist_tree.selection()
+        if not sel:
+            return
+        item = self.hist_tree.item(sel[0])
+        hist_id = int(item['values'][0])
+        system = self._get_smart_system()
+        ok, msg = system.revert_upgrade(hist_id)
+        if ok:
+            self._log(f"Reverted upgrade #{hist_id}")
+            self._refresh_history()
+        else:
+            self._log(f"Revert failed: {msg}", "err")
