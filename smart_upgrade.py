@@ -280,29 +280,30 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
     def _filter_duplicate_suggestions(self, suggestions: List[Dict]) -> List[Dict]:
         """Filter out suggestions where new_code already exists or is invalid."""
         filtered = []
-        for s in suggestions:
+        for i, s in enumerate(suggestions):
             new_code = s.get('new_code', '')
             current_code = s.get('current_code', '')
+            file_path = s.get('file', 'unknown')
 
             if not new_code:
-                self._emit(f"Skipping - no new_code: {s.get('issue', '')[:50]}", "warn")
+                self._emit(f"[{i+1}] {file_path}: Skipping - no new_code", "warn")
                 continue
 
             if not current_code:
-                self._emit(f"Skipping - no current_code: {s.get('file', '')}", "warn")
+                self._emit(f"[{i+1}] {file_path}: Skipping - no current_code", "warn")
                 continue
 
             if len(new_code) < 30:
-                self._emit(f"Skipping - code too short: {s.get('file', '')}", "warn")
+                self._emit(f"[{i+1}] {file_path}: Skipping - code too short ({len(new_code)} chars)", "warn")
                 continue
 
             if self._code_exists_in_project(new_code):
-                self._emit(f"Skipping duplicate - already exists: {s.get('file', '')}", "warn")
+                self._emit(f"[{i+1}] {file_path}: Skipping - already exists", "warn")
                 continue
 
             syntax_ok, err = self.verifier.check_syntax(new_code)
             if not syntax_ok:
-                self._emit(f"Skipping invalid syntax: {s.get('file', '')} - {err[:50]}", "warn")
+                self._emit(f"[{i+1}] {file_path}: Skipping - bad syntax: {err[:60]}", "warn")
                 continue
 
             filtered.append(s)
