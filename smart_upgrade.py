@@ -202,53 +202,20 @@ class SmartUpgradeSystem:
 
         system_msg = """You are an expert Python/ML engineer. Analyze the project context and suggest upgrades.
 
-IMPORTANT RULES:
-1. Only suggest changes where the new_code does NOT already exist in the project
-2. new_code MUST be a COMPLETE, VALID Python code block with proper indentation
-3. current_code MUST be an EXACT substring from the target file
-4. Both current_code and new_code must parse as valid Python syntax
+IMPORTANT:
+- new_code must be NEW code that does NOT already exist in the project
+- current_code and new_code must be valid Python syntax
+- Return ONLY valid JSON array
 
-Return ONLY valid JSON array (no markdown, no prose):
-[
-  {
-    "file": "filename.py",
-    "function": "function_name or null",
-    "issue": "brief description",
-    "reasoning": "why this helps",
-    "current_code": "EXACT lines to replace - must exist verbatim in file, include ALL indentation",
-    "new_code": "COMPLETE replacement code - must be valid Python with proper indentation, no truncation",
-    "verify": "what to check"
-  }
-]
+Return JSON array like:
+[{"file":"a.py","function":"foo","issue":"desc","reasoning":"why","current_code":"old code","new_code":"new code","verify":"check"}]
 
-GOOD current_code example:
-    def train(self):
-        loss = self.compute_loss()
-        return loss
+current_code: EXACT string from the file (copy-paste, no changes)
+new_code: COMPLETE replacement (no truncation, no partial code)
 
-BAD current_code (incomplete):
-    def train(self):
+Focus on: bug fixes, error handling, performance, imports, code quality.
 
-GOOD new_code example:
-    def train(self):
-        loss = self.compute_loss()
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        return loss
-
-BAD new_code (truncated/partial):
-    def train(self):
-        loss = self.compute_loss()
-
-Focus on:
-1. Bug fixes and error handling
-2. Performance improvements
-3. Code quality
-4. Missing imports
-5. Consistency across files
-
-CRITICAL: Only suggest truly NEW improvements. If similar code exists, skip it."""
+Only suggest if code truly doesn't exist and will improve the project."""
 
         user_msg = f"""Project context:
 {project_context}
@@ -269,7 +236,23 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
                     raw = raw[4:]
             raw = raw.strip()
 
-            suggestions = json.loads(raw)
+            try:
+                suggestions = json.loads(raw)
+            except json.JSONDecodeError as e:
+                self._emit(f"JSON parse error at pos {e.pos}: {e.msg[:50]}", "warn")
+                import re
+                match = re.search(r'\[.*\]', raw, re.DOTALL)
+                if match:
+                    try:
+                        suggestions = json.loads(match.group())
+                        self._emit("Recovered JSON from response", "ok")
+                    except:
+                        suggestions = []
+                else:
+                    suggestions = []
+
+            if not isinstance(suggestions, list):
+                suggestions = []
 
             self.db.save_llm_cache(cache_key, 
                 hashlib.sha256(user_msg.encode()).hexdigest()[:16],
