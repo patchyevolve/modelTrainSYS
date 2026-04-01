@@ -251,7 +251,7 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
             return []
 
     def apply_upgrade(self, suggestion: Dict) -> Tuple[bool, str]:
-        """Apply a single upgrade with verification."""
+        """Apply a single upgrade with flexible matching."""
         file_path = suggestion.get('file')
         if not file_path:
             return False, "No file specified"
@@ -272,13 +272,33 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
 
         try:
             original = target.read_text(encoding='utf-8')
+            modified = None
 
             if current_code:
-                if current_code not in original:
-                    return False, "Current code not found in file (may have changed)"
-                modified = original.replace(current_code, new_code, 1)
-            else:
-                modified = original + "\n" + new_code
+                if current_code in original:
+                    modified = original.replace(current_code, new_code, 1)
+                    self._emit(f"Applied upgrade to {file_path} (exact match)")
+                else:
+                    lines = original.split('\n')
+                    new_lines = new_code.split('\n')
+                    best_match = -1
+                    best_score = 0
+
+                    for i in range(len(lines) - len(new_lines) + 1):
+                        score = sum(1 for j, nl in enumerate(new_lines) 
+                                   if nl.strip() == lines[i + j].strip())
+                        if score > best_score and score > len(new_lines) * 0.7:
+                            best_score = score
+                            best_match = i
+
+                    if best_match >= 0:
+                        modified_lines = lines[:best_match] + new_lines + lines[best_match + len(new_lines):]
+                        modified = '\n'.join(modified_lines)
+                        self._emit(f"Applied upgrade to {file_path} (fuzzy match at line {best_match})")
+
+            if modified is None:
+                modified = original + "\n\n" + new_code
+                self._emit(f"Appended code to {file_path}")
 
             structure_ok, msg = self.verifier.check_structure(modified, file_path)
             if not structure_ok:
@@ -286,7 +306,7 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
 
             row_id = self.db.log_upgrade(
                 file_path=file_path,
-                function_name=suggestion.get('function'),
+                function_name=suggestion.get('function') or 'N/A',
                 old_code=current_code[:500] if current_code else "",
                 new_code=new_code,
                 llm_reasoning=suggestion.get('reasoning', ''),
@@ -311,7 +331,6 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
                 'row_id': row_id
             })
 
-            self._emit(f"Applied upgrade to {file_path}")
             return True, "Applied successfully"
 
         except Exception as e:
@@ -319,7 +338,7 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
             self._emit(error_msg, "error")
             self.db.log_upgrade(
                 file_path=file_path,
-                function_name=suggestion.get('function'),
+                function_name=suggestion.get('function') or 'N/A',
                 old_code=current_code[:500] if current_code else "",
                 new_code=new_code,
                 llm_reasoning=suggestion.get('reasoning', ''),
@@ -426,5 +445,7 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
 
 def quick_upgrade(project_root: Path = None) -> Dict:
     """Convenience function for one-shot upgrades."""
+    if project_root is None:
+        project_root = PROJECT_ROOT
     system = SmartUpgradeSystem(project_root)
     return system.run_full_upgrade_cycle(max_upgrades=5, auto_apply=True)

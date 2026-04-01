@@ -381,27 +381,45 @@ class ProjectAnalyzer:
 
         for ctx in contexts:
             sections.append(f"\n## File: {ctx['file_path']}")
-            sections.append(f"Lines: {ctx['ast_summary'].get('total_lines', '?')}")
+            ast_summary = ctx.get('ast_summary', '{}')
+            if isinstance(ast_summary, str):
+                try:
+                    ast_summary = json.loads(ast_summary)
+                except json.JSONDecodeError:
+                    ast_summary = {}
+            sections.append(f"Lines: {ast_summary.get('total_lines', '?')}")
 
             if ctx.get('docstring'):
                 sections.append(f"\nPurpose: {ctx['docstring']}")
 
-            if ctx['ast_summary'].get('classes'):
+            if ast_summary.get('classes'):
                 sections.append("\nClasses:")
-                for cls in ctx['ast_summary']['classes']:
+                for cls in ast_summary['classes']:
                     bases = f"({', '.join(cls['bases'])})" if cls['bases'] else ""
                     sections.append(f"  - {cls['name']}{bases}")
                     if cls['methods']:
                         sections.append(f"    Methods: {', '.join(cls['methods'])}")
 
-            if ctx['ast_summary'].get('functions'):
+            if ast_summary.get('functions'):
                 sections.append("\nFunctions:")
-                for fn in ctx['ast_summary']['functions'][:10]:
+                for fn in ast_summary['functions'][:10]:
                     args = ', '.join(fn['args'][:5])
                     sections.append(f"  - {fn['name']}({args})")
 
-            sections.append(f"\nExports: {', '.join(ctx['exports'][:20])}")
-            sections.append(f"Imports: {', '.join(ctx['imports'][:15])}")
+            exports = ctx.get('exports', '[]')
+            imports = ctx.get('imports', '[]')
+            if isinstance(exports, str):
+                try:
+                    exports = json.loads(exports)
+                except json.JSONDecodeError:
+                    exports = []
+            if isinstance(imports, str):
+                try:
+                    imports = json.loads(imports)
+                except json.JSONDecodeError:
+                    imports = []
+            sections.append(f"\nExports: {', '.join(exports[:20])}")
+            sections.append(f"Imports: {', '.join(imports[:15])}")
 
         return '\n'.join(sections)
 

@@ -229,13 +229,14 @@ class AutoUpgradeWindow(tk.Toplevel):
     def _run_cycle(self):
         self.run_btn.config(state="disabled")
         self._set_status("Running...", TEXT_WARN)
-        self._log("Starting full upgrade cycle...")
+        self._log("Analyzing project and querying LLM...")
 
         def _worker():
             try:
                 system = self._get_smart_system()
-                result = system.run_full_upgrade_cycle(max_upgrades=5, auto_apply=False)
-                self.after(0, self._on_cycle_done, result)
+                result = system.analyze_project()
+                suggestions = system.query_for_upgrades(max_upgrades=5)
+                self.after(0, self._on_cycle_done, suggestions, system)
             except Exception as e:
                 self.after(0, self._on_cycle_error, str(e))
 
@@ -269,12 +270,13 @@ class AutoUpgradeWindow(tk.Toplevel):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_cycle_done(self, result):
+    def _on_cycle_done(self, suggestions, system=None):
         self.run_btn.config(state="normal")
-        applied = result.get('applied_count', 0)
-        total = len(result.get('suggestions', []))
-        self._set_status(f"Done: {applied}/{total} suggestions", TEXT_OK)
-        self._log(f"Cycle complete: {applied}/{total} upgrades applied")
+        self._current_suggestions = suggestions
+        self._current_system = system
+        self._set_status(f"Got {len(suggestions)} suggestions - review and apply", TEXT_OK)
+        self._log(f"Got {len(suggestions)} suggestions - use 'Apply Selected' or 'Apply All'")
+        self._refresh_suggestions(suggestions)
         self._refresh_all()
 
     def _on_analyze_done(self, result):
