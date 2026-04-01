@@ -628,8 +628,11 @@ class TrainingPanel(tk.Frame):
         import torch, os
         # Set PyTorch to use all available CPU cores for matrix ops
         n_cores = os.cpu_count() or 4
-        torch.set_num_threads(n_cores)
-        torch.set_num_interop_threads(max(2, n_cores // 2))
+        try:
+            torch.set_num_threads(n_cores)
+            torch.set_num_interop_threads(max(2, n_cores // 2))
+        except RuntimeError:
+            pass  # Threads already set
 
         task = MODEL_REGISTRY.get(cfg["model_type"], {}).get("task", "binary_classification")
         if task == "language_model":
