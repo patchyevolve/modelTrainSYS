@@ -170,7 +170,8 @@ class SmartUpgradeSystem:
         if cached:
             self._emit("Using cached upgrade suggestions")
             try:
-                return json.loads(cached)
+                suggestions = json.loads(cached)
+                return self._filter_duplicate_suggestions(suggestions)
             except json.JSONDecodeError:
                 pass
 
