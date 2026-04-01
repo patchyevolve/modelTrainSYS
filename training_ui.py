@@ -674,10 +674,9 @@ class TrainingPanel(tk.Frame):
             train_loader, val_loader, tokenizer, info = build_text_loaders(
                 files, seq_len=seq_len, batch_size=batch_size)
 
-            # Wrap with prefetch — loads next batch while current batch trains
+            # Wrap train with prefetch — validation stays simple to avoid thread issues
             from prefetch_loader import PrefetchLoader
             train_loader = PrefetchLoader(train_loader, buffer_size=3)
-            val_loader   = PrefetchLoader(val_loader,   buffer_size=2)
 
             n_batches = info["train_batches"]
             self._ui(self._log,
@@ -823,8 +822,8 @@ class TrainingPanel(tk.Frame):
             avg_loss   = epoch_loss / max(step, 1)
             perplexity = min(math.exp(avg_loss), 9999.0)
 
-            self._ui(self._log, f"Running validation...", "info")
-            val_l = lm_val_loss(model, val_loader, device=device, max_batches=100)
+            self._ui(self._log, "Running validation...", "info")
+            val_l = lm_val_loss(model, val_loader, device=device, max_batches=50)
             val_p = min(math.exp(val_l), 9999.0)
             if val_l < best_val:
                 best_val   = val_l

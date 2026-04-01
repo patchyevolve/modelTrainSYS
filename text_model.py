@@ -35,23 +35,19 @@ def lm_train_step(model: MambaLM, optimizer: torch.optim.Optimizer,
 def lm_val_loss(model: MambaLM,
                 loader: torch.utils.data.DataLoader,
                 device: torch.device = None,
-                max_batches: int = 100) -> float:
+                max_batches: int = 50) -> float:
     model.eval()
     if device is None:
         device = next(model.parameters()).device
     total = 0.0
     count = 0
     for xb, yb in loader:
-        if isinstance(xb, (list, tuple)):
-            xb = tuple(t.to(device) if isinstance(t, torch.Tensor) else t for t in xb)
-            yb = tuple(t.to(device) if isinstance(t, torch.Tensor) else t for t in yb)
-        else:
-            xb = xb.to(device)
-            yb = yb.to(device)
-        logits = model(xb)
+        xb_dev = xb[0].to(device) if isinstance(xb, (list, tuple)) else xb.to(device)
+        yb_dev = yb[0].to(device) if isinstance(yb, (list, tuple)) else yb.to(device)
+        logits = model(xb_dev)
         total += F.cross_entropy(
             logits.view(-1, logits.size(-1)),
-            yb.view(-1), ignore_index=0).item()
+            yb_dev.view(-1), ignore_index=0).item()
         count += 1
         if count >= max_batches:
             break
