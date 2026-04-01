@@ -823,7 +823,8 @@ class TrainingPanel(tk.Frame):
             avg_loss   = epoch_loss / max(step, 1)
             perplexity = min(math.exp(avg_loss), 9999.0)
 
-            val_l = lm_val_loss(model, val_loader)
+            self._ui(self._log, f"Running validation...", "info")
+            val_l = lm_val_loss(model, val_loader, device=device, max_batches=100)
             val_p = min(math.exp(val_l), 9999.0)
             if val_l < best_val:
                 best_val   = val_l
