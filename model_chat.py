@@ -692,3 +692,10 @@ def start_chat(model_name: Optional[str] = None):
 
 
 import os  # needed for ANSI enable
+
+
+from typing import Dict
+
+def _detect_task(ckpt: Dict, meta: Dict) -> str:
+    # Detect model type
+    return model_type

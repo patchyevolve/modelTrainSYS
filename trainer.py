@@ -536,3 +536,9 @@ class CybersecurityTrainer(ReflectorIntegratedTrainer):
             'Review vendor advisories',
             'Test in staging environment first'
         ]
+
+
+def train_step_cybersec(self, batch):
+    with torch.set_grad_enabled(True):
+        # Train on batch
+        return loss

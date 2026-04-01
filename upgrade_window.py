@@ -450,6 +450,9 @@ class AutoUpgradeWindow(tk.Toplevel):
             ok, msg = system.apply_upgrade(s)
             if ok:
                 self._log(f"Applied upgrade to {s.get('file', '')}")
+                self._log("Clearing cache and re-analyzing...")
+                system.db.clear_llm_cache()
+                system.analyze_project(force=True)
                 self._refresh_history()
             else:
                 self._log(f"Failed: {msg}", "err")
@@ -457,10 +460,18 @@ class AutoUpgradeWindow(tk.Toplevel):
     def _apply_all(self):
         if hasattr(self, '_current_suggestions'):
             system = self._get_smart_system()
+            applied = 0
             for s in self._current_suggestions:
                 ok, msg = system.apply_upgrade(s)
                 status = "OK" if ok else f"FAIL: {msg}"
                 self._log(f"{s.get('file', '')}: {status}")
+                if ok:
+                    applied += 1
+            if applied > 0:
+                self._log(f"Clearing cache and re-analyzing {applied} file(s)...")
+                system.db.clear_llm_cache()
+                system.analyze_project(force=True)
+                self._log("Cache cleared. Next query will get fresh suggestions.")
             self._refresh_history()
 
     def _discard_all(self):

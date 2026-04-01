@@ -393,6 +393,12 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
                     if not verify_ok:
                         self._emit(f"  WARNING: {verify_msg}", "warn")
 
+        if self._applied:
+            self._emit("Clearing cache and re-analyzing changed files...")
+            self.db.clear_llm_cache()
+            self.db.save_llm_cache("upgrades_all_5", "forced", "[]", ttl_seconds=0)
+            self.analyze_project(force=True)
+
         self._emit(f"=== Cycle complete: {len(self._applied)}/{len(suggestions)} applied ===")
 
         return {

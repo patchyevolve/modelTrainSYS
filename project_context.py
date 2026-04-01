@@ -188,6 +188,16 @@ class ProjectFileDB:
         """, (cache_key, datetime.now().isoformat())).fetchone()
         return row["response"] if row else None
 
+    def clear_llm_cache(self) -> None:
+        c = self._conn()
+        c.execute("DELETE FROM llm_cache")
+        c.commit()
+
+    def invalidate_cache_for_key(self, cache_key: str) -> None:
+        c = self._conn()
+        c.execute("DELETE FROM llm_cache WHERE cache_key LIKE ?", (f"{cache_key}%",))
+        c.commit()
+
     def log_upgrade(self, file_path: str, function_name: str,
                     old_code: str, new_code: str, 
                     llm_reasoning: str, status: str = "pending") -> int:
