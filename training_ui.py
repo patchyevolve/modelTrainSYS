@@ -1163,7 +1163,7 @@ class TrainingPanel(tk.Frame):
             from data_loader import build_loaders
             self._ui(self._log, "Loading dataset…", "info")
             train_loader, val_loader, data_info = build_loaders(
-                files, batch_size=batch_size)
+                files, batch_size=batch_size, val_split=0.15, num_workers=0)
 
             from prefetch_loader import PrefetchLoader
             train_loader = PrefetchLoader(train_loader, buffer_size=3)
