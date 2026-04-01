@@ -251,7 +251,7 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
             return []
 
     def apply_upgrade(self, suggestion: Dict) -> Tuple[bool, str]:
-        """Apply a single upgrade with flexible matching."""
+        """Apply a single upgrade - exact match only."""
         file_path = suggestion.get('file')
         if not file_path:
             return False, "No file specified"
@@ -272,33 +272,13 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
 
         try:
             original = target.read_text(encoding='utf-8')
-            modified = None
 
             if current_code:
-                if current_code in original:
-                    modified = original.replace(current_code, new_code, 1)
-                    self._emit(f"Applied upgrade to {file_path} (exact match)")
-                else:
-                    lines = original.split('\n')
-                    new_lines = new_code.split('\n')
-                    best_match = -1
-                    best_score = 0
-
-                    for i in range(len(lines) - len(new_lines) + 1):
-                        score = sum(1 for j, nl in enumerate(new_lines) 
-                                   if nl.strip() == lines[i + j].strip())
-                        if score > best_score and score > len(new_lines) * 0.7:
-                            best_score = score
-                            best_match = i
-
-                    if best_match >= 0:
-                        modified_lines = lines[:best_match] + new_lines + lines[best_match + len(new_lines):]
-                        modified = '\n'.join(modified_lines)
-                        self._emit(f"Applied upgrade to {file_path} (fuzzy match at line {best_match})")
-
-            if modified is None:
-                modified = original + "\n\n" + new_code
-                self._emit(f"Appended code to {file_path}")
+                if current_code not in original:
+                    return False, "Current code not found - exact match required"
+                modified = original.replace(current_code, new_code, 1)
+            else:
+                modified = original + "\n" + new_code
 
             structure_ok, msg = self.verifier.check_structure(modified, file_path)
             if not structure_ok:
@@ -331,6 +311,7 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
                 'row_id': row_id
             })
 
+            self._emit(f"Applied upgrade to {file_path}")
             return True, "Applied successfully"
 
         except Exception as e:
