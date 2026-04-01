@@ -231,7 +231,7 @@ def build_loaders(file_paths: List[str],
     return train_loader, val_loader, info
 
 
-def build_loaders(file_paths, batch_size, val_split, num_workers):
+def build_csv_loaders(file_paths, batch_size, val_split, num_workers):
     loaders = []
     for file_path in file_paths:
         with open(file_path, 'r') as f:
