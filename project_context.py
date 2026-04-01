@@ -385,51 +385,40 @@ class ProjectAnalyzer:
             'dependencies': deps,
         }
 
-    def generate_context_for_llm(self, contexts: List[Dict]) -> str:
+    def generate_context_for_llm(self, contexts: List[Dict], max_chars: int = 8000) -> str:
         sections = []
-        sections.append("# PROJECT CONTEXT\n")
+        sections.append("# PROJECT CONTEXT (summary)\n")
 
+        total_chars = 0
         for ctx in contexts:
-            sections.append(f"\n## File: {ctx['file_path']}")
+            if total_chars > max_chars:
+                sections.append(f"\n... and {len(contexts) - len(sections)} more files")
+                break
+
+            sections.append(f"\n## {ctx['file_path']}")
             ast_summary = ctx.get('ast_summary', '{}')
             if isinstance(ast_summary, str):
                 try:
                     ast_summary = json.loads(ast_summary)
                 except json.JSONDecodeError:
                     ast_summary = {}
-            sections.append(f"Lines: {ast_summary.get('total_lines', '?')}")
 
             if ctx.get('docstring'):
-                sections.append(f"\nPurpose: {ctx['docstring']}")
+                doc = ctx['docstring'][:100]
+                sections.append(f"Desc: {doc}")
 
-            if ast_summary.get('classes'):
-                sections.append("\nClasses:")
-                for cls in ast_summary['classes']:
-                    bases = f"({', '.join(cls['bases'])})" if cls['bases'] else ""
-                    sections.append(f"  - {cls['name']}{bases}")
-                    if cls['methods']:
-                        sections.append(f"    Methods: {', '.join(cls['methods'])}")
+            classes = ast_summary.get('classes', [])
+            functions = ast_summary.get('functions', [])[:5]
 
-            if ast_summary.get('functions'):
-                sections.append("\nFunctions:")
-                for fn in ast_summary['functions'][:10]:
-                    args = ', '.join(fn['args'][:5])
-                    sections.append(f"  - {fn['name']}({args})")
+            if classes:
+                names = ', '.join(c['name'] for c in classes[:5])
+                sections.append(f"Classes: {names}")
 
-            exports = ctx.get('exports', '[]')
-            imports = ctx.get('imports', '[]')
-            if isinstance(exports, str):
-                try:
-                    exports = json.loads(exports)
-                except json.JSONDecodeError:
-                    exports = []
-            if isinstance(imports, str):
-                try:
-                    imports = json.loads(imports)
-                except json.JSONDecodeError:
-                    imports = []
-            sections.append(f"\nExports: {', '.join(exports[:20])}")
-            sections.append(f"Imports: {', '.join(imports[:15])}")
+            if functions:
+                names = ', '.join(f['name'] for f in functions[:8])
+                sections.append(f"Functions: {names}")
+
+            total_chars += sum(len(s) for s in sections[-10:])
 
         return '\n'.join(sections)
 

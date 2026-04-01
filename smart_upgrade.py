@@ -181,8 +181,17 @@ class SmartUpgradeSystem:
 
         if focus_files:
             contexts = [c for c in contexts if c['file_path'] in focus_files]
+        else:
+            key_files = {
+                'architecture.py', 'implementations.py', 'trainer.py', 
+                'data_loader.py', 'inference.py', 'text_model.py',
+                'text_dataset.py', 'image_dataset.py', 'chat.py', 'model_chat.py'
+            }
+            contexts = [c for c in contexts if c['file_path'] in key_files]
+            if not contexts:
+                contexts = self.db.get_all_contexts()[:10]
 
-        project_context = self.get_full_context()
+        project_context = self.analyzer.generate_context_for_llm(contexts, max_chars=6000)
 
         history = self.db.get_upgrade_history(limit=10)
         history_text = ""
