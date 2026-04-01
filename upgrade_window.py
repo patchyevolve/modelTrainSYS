@@ -229,11 +229,12 @@ class AutoUpgradeWindow(tk.Toplevel):
     def _run_cycle(self):
         self.run_btn.config(state="disabled")
         self._set_status("Running...", TEXT_WARN)
-        self._log("Analyzing project and querying LLM...")
+        self._log("Clearing cache, analyzing project, querying LLM...")
 
         def _worker():
             try:
                 system = self._get_smart_system()
+                system.db.clear_llm_cache()
                 result = system.analyze_project()
                 suggestions = system.query_for_upgrades(max_upgrades=5)
                 self.after(0, self._on_cycle_done, suggestions, system)
