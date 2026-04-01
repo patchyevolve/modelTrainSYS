@@ -697,5 +697,11 @@ import os  # needed for ANSI enable
 from typing import Dict
 
 def _detect_task(ckpt: Dict, meta: Dict) -> str:
-    # Detect model type
-    return model_type
+    if "model_config" in ckpt or "char2idx" in ckpt:
+        return "language_model"
+    elif meta.get("model_type", "").lower() in ("hmtclassifier", "hierarchical mamba"):
+        return "classifier"
+    elif meta.get("model_type", "").lower() in ("hmtimageclassifier", "image classification"):
+        return "image_classification"
+    else:
+        return "classifier"
