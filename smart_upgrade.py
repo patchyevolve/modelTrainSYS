@@ -192,33 +192,53 @@ class SmartUpgradeSystem:
 
         system_msg = """You are an expert Python/ML engineer. Analyze the project context and suggest upgrades.
 
-IMPORTANT: Only suggest changes where the new_code does NOT already exist in the project!
-Skip any improvements that are already implemented.
+IMPORTANT RULES:
+1. Only suggest changes where the new_code does NOT already exist in the project
+2. new_code MUST be a COMPLETE, VALID Python code block with proper indentation
+3. current_code MUST be an EXACT substring from the target file
+4. Both current_code and new_code must parse as valid Python syntax
 
 Return ONLY valid JSON array (no markdown, no prose):
 [
   {
     "file": "filename.py",
     "function": "function_name or null",
-    "issue": "brief description of what to fix/improve",
-    "reasoning": "why this upgrade helps",
-    "current_code": "exact code to replace (string with \\n) - must exist exactly in file",
-    "new_code": "replacement code (string with \\n) - must NOT already exist in project",
-    "verify": "what to check to confirm it works"
+    "issue": "brief description",
+    "reasoning": "why this helps",
+    "current_code": "EXACT lines to replace - must exist verbatim in file, include ALL indentation",
+    "new_code": "COMPLETE replacement code - must be valid Python with proper indentation, no truncation",
+    "verify": "what to check"
   }
 ]
 
+GOOD current_code example:
+    def train(self):
+        loss = self.compute_loss()
+        return loss
+
+BAD current_code (incomplete):
+    def train(self):
+
+GOOD new_code example:
+    def train(self):
+        loss = self.compute_loss()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        return loss
+
+BAD new_code (truncated/partial):
+    def train(self):
+        loss = self.compute_loss()
+
 Focus on:
 1. Bug fixes and error handling
-2. Performance improvements (avoid redundant loops, use numpy/torch ops)
-3. Code quality (type hints, cleaner structure)
-4. Missing imports or exports
+2. Performance improvements
+3. Code quality
+4. Missing imports
 5. Consistency across files
 
-CRITICAL: 
-- new_code must be NEW code that does NOT exist anywhere in the project
-- If code similar to your suggestion exists, skip it
-- Only suggest truly new improvements"""
+CRITICAL: Only suggest truly NEW improvements. If similar code exists, skip it."""
 
         user_msg = f"""Project context:
 {project_context}
@@ -258,22 +278,37 @@ Suggest {max_upgrades} concrete, verifiable upgrades as JSON array."""
             return []
 
     def _filter_duplicate_suggestions(self, suggestions: List[Dict]) -> List[Dict]:
-        """Filter out suggestions where new_code already exists in project."""
+        """Filter out suggestions where new_code already exists or is invalid."""
         filtered = []
         for s in suggestions:
             new_code = s.get('new_code', '')
+            current_code = s.get('current_code', '')
+
             if not new_code:
                 self._emit(f"Skipping - no new_code: {s.get('issue', '')[:50]}", "warn")
+                continue
+
+            if not current_code:
+                self._emit(f"Skipping - no current_code: {s.get('file', '')}", "warn")
+                continue
+
+            if len(new_code) < 30:
+                self._emit(f"Skipping - code too short: {s.get('file', '')}", "warn")
                 continue
 
             if self._code_exists_in_project(new_code):
                 self._emit(f"Skipping duplicate - already exists: {s.get('file', '')}", "warn")
                 continue
 
+            syntax_ok, err = self.verifier.check_syntax(new_code)
+            if not syntax_ok:
+                self._emit(f"Skipping invalid syntax: {s.get('file', '')} - {err[:50]}", "warn")
+                continue
+
             filtered.append(s)
 
         if len(filtered) < len(suggestions):
-            self._emit(f"Filtered {len(suggestions) - len(filtered)} duplicate suggestions")
+            self._emit(f"Filtered {len(suggestions) - len(filtered)} invalid/duplicate suggestions")
 
         return filtered
 

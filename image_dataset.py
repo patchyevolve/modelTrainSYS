@@ -272,3 +272,11 @@ def get_transforms(img_size, augment):
 def get_transforms(img_size, augment):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     # other transforms here
+
+
+import random
+
+def get_transforms(img_size, augment):
+    random.seed()
+    transforms = []
+    # transform creation code

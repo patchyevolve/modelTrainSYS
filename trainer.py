@@ -542,3 +542,8 @@ def train_step_cybersec(self, batch):
     with torch.set_grad_enabled(True):
         # Train on batch
         return loss
+
+def train_step_cybersec(self, batch):
+    if len(batch) != self.batch_size:
+        raise ValueError("Batch size mismatch")
+    # training step code
