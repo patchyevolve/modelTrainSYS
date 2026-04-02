@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import logging
 import traceback
 
-from project_context import ProjectFileDB, ProjectAnalyzer, GroqClientCached
+from utils.project_context import ProjectFileDB, ProjectAnalyzer, GroqClientCached
 
 log = logging.getLogger("SmartUpgrade")
 

@@ -169,18 +169,33 @@ class TextLMDataset(Dataset):
     target = tokens[i+1 : i+seq_len+1]
     """
 
-    def __init__(self, tokens: List[int], seq_len: int = 128):
+    def __init__(self, tokens: List[int], seq_len: int = 128, 
+                 reasoning_only: bool = False, tokenizer: Optional['CharTokenizer'] = None):
         self.tokens  = torch.tensor(tokens, dtype=torch.long)
         self.seq_len = seq_len
-        # Number of complete windows
-        self.n = max(0, len(tokens) - seq_len)
+        self.tokenizer = tokenizer
+        
+        if reasoning_only and tokenizer:
+            # Filter windows to only include those containing reasoning keywords
+            # Keywords: "Thought:", "Reason:", "because", "therefore", "Step"
+            valid_indices = []
+            for i in range(0, len(tokens) - seq_len):
+                # Check a window for reasoning markers
+                # We decode a small portion or check for specific char patterns
+                window_text = tokenizer.decode(tokens[i : i + seq_len]).lower()
+                if any(k in window_text for k in ["thought:", "reason:", "because", "step", "since", "therefore"]):
+                    valid_indices.append(i)
+            self.indices = valid_indices
+        else:
+            self.indices = list(range(max(0, len(tokens) - seq_len)))
 
     def __len__(self) -> int:
-        return self.n
+        return len(self.indices)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = self.tokens[idx     : idx + self.seq_len]
-        y = self.tokens[idx + 1 : idx + self.seq_len + 1]
+        start = self.indices[idx]
+        x = self.tokens[start     : start + self.seq_len]
+        y = self.tokens[start + 1 : start + self.seq_len + 1]
         return x, y
 
     @property
@@ -198,6 +213,7 @@ def build_text_loaders(
     batch_size: int   = 32,
     val_split:  float = 0.1,
     tokenizer:  Optional[CharTokenizer] = None,
+    reasoning_only: bool = False,
 ) -> Tuple[DataLoader, DataLoader, CharTokenizer, Dict]:
     """
     Build train + val DataLoaders for language model training.
@@ -216,7 +232,8 @@ def build_text_loaders(
     tokens = tokenizer.encode(corpus)
     log.info(f"Tokenized: {len(tokens):,} tokens, vocab={tokenizer.vocab_size}")
 
-    full_ds = TextLMDataset(tokens, seq_len=seq_len)
+    full_ds = TextLMDataset(tokens, seq_len=seq_len, 
+                            reasoning_only=reasoning_only, tokenizer=tokenizer)
     n_val   = max(1, int(len(full_ds) * val_split))
     n_train = len(full_ds) - n_val
 

@@ -77,37 +77,30 @@ goto :menu
 
 :do_gui
 !PYTHON! start.py --ui
-pause
 goto :menu
 
 :do_chat
 !PYTHON! start.py --chat
-pause
 goto :menu
 
 :do_inference
 !PYTHON! start.py --inference
-pause
 goto :menu
 
 :do_list
 !PYTHON! start.py --list
-pause
 goto :menu
 
 :do_upgrade
 !PYTHON! start.py --upgrade
-pause
 goto :menu
 
 :do_check
 !PYTHON! start.py --check
-pause
 goto :menu
 
 :do_install
 !PYTHON! -m pip install torch torchvision numpy pandas Pillow
-pause
 goto :menu
 
 :parse_arg
@@ -125,7 +118,6 @@ exit /b 1
 
 :do_smart
 !PYTHON! start.py --smart
-pause
 goto :menu
 
 :do_help

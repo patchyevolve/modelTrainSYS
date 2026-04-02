@@ -16,9 +16,9 @@ except ImportError:
 
 # Support both flat-file execution and package import
 try:
-    from .architecture import MLSystemOrchestrator, BaseModule, ModuleConfig
+    from core.architecture import MLSystemOrchestrator, BaseModule, ModuleConfig
 except ImportError:
-    from architecture import MLSystemOrchestrator, BaseModule, ModuleConfig
+    from .architecture import MLSystemOrchestrator, BaseModule, ModuleConfig
 
 
 # ============================================================================
@@ -473,11 +473,12 @@ class MLChatInterface:
     
     def _cmd_chat(self, args: str) -> None:
         """Chat with the model"""
-        if not args:
-            print("Usage: chat <question/prompt>")
-            return
+        from ui.model_chat import start_chat
         
-        print(f"\nQuestion: {args}")
-        print("\nModel Response:")
-        print("This is where the model would generate a response based on its training.")
-        print("In a real system, this would use the decoder to generate text outputs.")
+        # If args is empty, let start_chat handle it (it will ask for model name)
+        model_name = args.strip() or None
+        
+        try:
+            start_chat(model_name)
+        except Exception as e:
+            print(f"Error starting chat: {e}")

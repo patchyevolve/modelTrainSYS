@@ -32,13 +32,16 @@ class PrefetchLoader:
         return len(self.loader)
 
     def __iter__(self) -> Iterator[Any]:
-        q        = queue.Queue(maxsize=self.buffer_size)
-        sentinel = object()   # unique end-of-stream marker
+        q           = queue.Queue(maxsize=self.buffer_size)
+        sentinel    = object()
+        self._exc   = None
 
         def _producer():
             try:
                 for batch in self.loader:
                     q.put(batch)
+            except Exception as e:
+                self._exc = e
             finally:
                 q.put(sentinel)
 
@@ -47,6 +50,8 @@ class PrefetchLoader:
 
         while True:
             item = q.get()
+            if self._exc:
+                raise self._exc
             if item is sentinel:
                 break
             yield item

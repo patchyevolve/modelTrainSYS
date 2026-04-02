@@ -1,0 +1,21 @@
+{
+  "total_samples": 9537,
+  "threshold": 0.5,
+  "accuracy": 0.4112404320016777,
+  "precision": 0.46790757381258025,
+  "recall": 0.6318982952903786,
+  "f1_score": 0.5376767055931162,
+  "false_positive_rate": 0.589057318806253,
+  "tp": 2187,
+  "tn": 1735,
+  "fp": 2487,
+  "fn": 1274,
+  "attack_detected": 4674,
+  "benign_detected": 3009,
+  "avg_confidence": 0.5364006757736206,
+  "high_confidence": 698,
+  "low_confidence": 308,
+  "model": "Mamba+Transformer_20260402_040126",
+  "data_file": "randomDATA\\cybersecurity_intrusion_data.csv",
+  "timestamp": "2026-04-02T04:09:39.742894"
+}

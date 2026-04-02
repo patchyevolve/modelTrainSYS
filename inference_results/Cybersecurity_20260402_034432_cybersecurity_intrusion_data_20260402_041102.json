@@ -1,0 +1,21 @@
+{
+  "total_samples": 9537,
+  "threshold": 0.5,
+  "accuracy": 0.8845548914753067,
+  "precision": 0.9661066902446213,
+  "recall": 0.7687617260787992,
+  "f1_score": 0.8562100039179835,
+  "false_positive_rate": 0.021809216764650103,
+  "tp": 3278,
+  "tn": 5158,
+  "fp": 115,
+  "fn": 986,
+  "attack_detected": 3393,
+  "benign_detected": 6144,
+  "avg_confidence": 0.46494948863983154,
+  "high_confidence": 3153,
+  "low_confidence": 6042,
+  "model": "Cybersecurity_20260402_034432",
+  "data_file": "randomDATA\\cybersecurity_intrusion_data.csv",
+  "timestamp": "2026-04-02T04:11:02.875801"
+}

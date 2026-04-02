@@ -150,12 +150,22 @@ def discover_images(paths: List[str]) -> Tuple[List[Tuple[str, int]], List[str]]
         if p.suffix.lower() == ".csv":
             import pandas as pd
             df = pd.read_csv(p)
-            if "filepath" in df.columns and "label" in df.columns:
+            fp_col = next((c for c in df.columns if c.lower() in ("filepath", "file_path", "path", "filename", "file")), None)
+            lbl_col = next((c for c in df.columns if c.lower() in ("label", "class", "category", "target", "name")), None)
+            if fp_col and lbl_col:
+                log.info(f"CSV columns: filepath={fp_col}, label={lbl_col}")
                 for _, row in df.iterrows():
-                    fp  = Path(str(row["filepath"]))
-                    lbl = str(row["label"])
+                    fp  = Path(str(row[fp_col]))
+                    lbl = str(row[lbl_col])
                     if fp.exists() and fp.suffix.lower() in IMG_EXTS:
                         samples.append((str(fp), _get_class(lbl)))
+                    elif not fp.exists():
+                        log.warning(f"Image not found: {fp}")
+                if not samples:
+                    log.warning("CSV loaded but no valid images found. Check paths.")
+            else:
+                log.warning(f"CSV missing columns. Found: {list(df.columns)}")
+                log.warning("Need: filepath + label (or file_path, path, class, category)")
             continue
 
         # Single image file
@@ -250,33 +260,3 @@ def build_image_loaders(
         "val_batches":   len(val_loader),
     }
     return train_loader, val_loader, class_names, info
-
-
-def get_transforms(img_size, augment):
-    normalize = transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-    if augment:
-        transform = transforms.Compose([
-            transforms.Resize(img_size),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize
-        ])
-    else:
-        transform = transforms.Compose([
-            transforms.Resize(img_size),
-            transforms.ToTensor(),
-            normalize
-        ])
-    return transform
-
-def get_transforms(img_size, augment):
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    # other transforms here
-
-
-import random
-
-def get_transforms(img_size, augment):
-    random.seed()
-    transforms = []
-    # transform creation code

@@ -63,18 +63,18 @@ def _ensure_loaded():
     _loaded["arch"]   = _load("mlsystem.core.architecture",
                                "mlsystem.cybersec.architecture",
                                "mlsystem.interface.architecture",
-                               filepath=ROOT / "architecture.py")
+                               filepath=ROOT / "core" / "architecture.py")
     _loaded["impls"]  = _load("mlsystem.core.implementations",
-                               filepath=ROOT / "implementations.py")
+                               filepath=ROOT / "core" / "implementations.py")
     _loaded["refl"]   = _load("mlsystem.core.reflector_trainer",
                                "mlsystem.cybersec.reflector_trainer",
-                               filepath=ROOT / "reflector_trainer.py")
+                               filepath=ROOT / "training" / "reflector_trainer.py")
     _loaded["upg"]    = _load("mlsystem.core.auto_upgrade",
-                               filepath=ROOT / "auto_upgrade.py")
+                               filepath=ROOT / "utils" / "auto_upgrade.py")
     _loaded["csec"]   = _load("mlsystem.cybersec.trainer",
-                               filepath=ROOT / "trainer.py")
+                               filepath=ROOT / "training" / "trainer.py")
     _loaded["chat_m"] = _load("mlsystem.interface.chat",
-                               filepath=ROOT / "chat.py")
+                               filepath=ROOT / "ui" / "chat.py")
 
 
 # ── Public aliases (available after _ensure_loaded) ───────────────────────────
@@ -211,7 +211,7 @@ def load_model_for_inference(name_or_path: str):
     hidden    = (hidden // num_heads) * num_heads
 
     model = HMTClassifier(
-        input_dim=feat_dim, num_classes=1,
+        input_dim=feat_dim, num_classes=data_info.get("num_classes", 1),
         dim=hidden, num_layers=layers,
         num_heads=num_heads, num_scales=3)
     model.load_state_dict(ckpt["model_state_dict"], strict=False)
@@ -226,21 +226,21 @@ def load_model_for_inference(name_or_path: str):
 # ═════════════════════════════════════════════════════════════════════════════
 
 REQUIRED_FILES = [
-    ("architecture.py",      "Core architecture & base classes"),
-    ("implementations.py",   "HMT backbone — Mamba + Transformer"),
-    ("reflector_trainer.py", "Reflector + LLM reflector + trainer"),
-    ("auto_upgrade.py",      "Self-upgrade system + SQLite DB"),
-    ("project_context.py",    "Project file context storage"),
-    ("smart_upgrade.py",     "Smart upgrade with full project analysis"),
-    ("trainer.py",           "Cybersecurity adversarial trainer"),
-    ("chat.py",              "System CLI interface"),
-    ("training_ui.py",       "Visual training GUI"),
-    ("upgrade_window.py",    "Auto-upgrade window"),
-    ("data_loader.py",       "CSV / NPY data loader"),
-    ("inference.py",         "Classifier inference engine"),
-    ("text_dataset.py",      "Text corpus loader + tokenizer"),
-    ("text_model.py",        "HMT language model shim"),
-    ("model_chat.py",        "Model chat / inference session"),
+    ("core/architecture.py",      "Core architecture & base classes"),
+    ("core/implementations.py",   "HMT backbone — Mamba + Transformer"),
+    ("training/reflector_trainer.py", "Reflector + LLM reflector + trainer"),
+    ("utils/auto_upgrade.py",      "Self-upgrade system + SQLite DB"),
+    ("utils/project_context.py",    "Project file context storage"),
+    ("utils/smart_upgrade.py",     "Smart upgrade with full project analysis"),
+    ("training/trainer.py",           "Cybersecurity adversarial trainer"),
+    ("ui/chat.py",              "System CLI interface"),
+    ("ui/training_ui.py",       "Visual training GUI"),
+    ("ui/upgrade_window.py",    "Auto-upgrade window"),
+    ("data/data_loader.py",       "CSV / NPY data loader"),
+    ("utils/inference.py",         "Classifier inference engine"),
+    ("data/text_dataset.py",      "Text corpus loader + tokenizer"),
+    ("core/text_model.py",        "HMT language model shim"),
+    ("ui/model_chat.py",        "Model chat / inference session"),
     ("run.bat",              "Windows batch launcher"),
     ("mamba_kernel.cpp",     "C++ Mamba kernel (optional)"),
 ]
@@ -328,22 +328,22 @@ def _cmd_ui():
 
     try:
         from tkinterdnd2 import TkinterDnD
-        import training_ui as ui
+        from ui import training_ui as ui
         class App(ui.TrainingApp, TkinterDnD.Tk):
             def __init__(self):
                 TkinterDnD.Tk.__init__(self)
-                ui.TrainingApp.__init__(self)
+                ui.TrainingApp.__init__(self, skip_init=True)
                 self._upgrade_system = upgrade_sys
         App().mainloop()
     except ImportError:
-        import training_ui as ui
+        from ui import training_ui as ui
         app = ui.TrainingApp()
         app._upgrade_system = upgrade_sys
         app.mainloop()
 
 
 def _cmd_chat(model_name):
-    from model_chat import start_chat
+    from ui.model_chat import start_chat
     if model_name is None:
         print_models()
         try:
@@ -362,7 +362,7 @@ def _cmd_inference():
     except (KeyboardInterrupt, EOFError):
         return
 
-    args = ["inference.py", "--save"]
+    args = ["utils/inference.py", "--save"]
     if model_name:
         pt = Path("trained_models") / f"{model_name}.pt"
         if not pt.exists():
@@ -381,7 +381,7 @@ def _cmd_upgrade():
     system      = build_default_system(with_upgrade=True)
     upgrade_sys = system.modules.get("auto_upgrade")
     import tkinter as tk
-    from upgrade_window import AutoUpgradeWindow
+    from ui.upgrade_window import AutoUpgradeWindow
     root = tk.Tk()
     root.withdraw()
     win  = AutoUpgradeWindow(root, upgrade_sys)
@@ -390,7 +390,7 @@ def _cmd_upgrade():
 
 
 def _cmd_smart_upgrade():
-    from smart_upgrade import quick_upgrade
+    from utils.smart_upgrade import quick_upgrade
     print(cyan("\n  Running Smart Upgrade..."))
     result = quick_upgrade()
     print(green(f"\n  Applied {result.get('applied_count', 0)} upgrades"))

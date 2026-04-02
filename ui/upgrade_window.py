@@ -60,14 +60,14 @@ class AutoUpgradeWindow(tk.Toplevel):
         if self.smart_upgrade:
             return self.smart_upgrade
         
-        from smart_upgrade import SmartUpgradeSystem
+        from utils.smart_upgrade import SmartUpgradeSystem
         self.smart_upgrade = SmartUpgradeSystem()
         self.smart_upgrade.set_log_callback(self._on_log)
         return self.smart_upgrade
 
     def _get_db(self):
         try:
-            from project_context import ProjectFileDB
+            from utils.project_context import ProjectFileDB
             return ProjectFileDB()
         except ImportError:
             return None

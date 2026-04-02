@@ -12,11 +12,11 @@ import json
 
 # Support both flat-file execution and package import
 try:
+    from core.architecture import Trainer, ModuleConfig, ComponentType
+    from training.reflector_trainer import ReflectorIntegratedTrainer
+except ImportError:
     from .architecture import Trainer, ModuleConfig, ComponentType
     from .reflector_trainer import ReflectorIntegratedTrainer
-except ImportError:
-    from architecture import Trainer, ModuleConfig, ComponentType
-    from reflector_trainer import ReflectorIntegratedTrainer
 
 
 # ============================================================================
@@ -43,6 +43,16 @@ class AttackPatternGenerator:
         
         self.real_time_feeds = []
         self.synthetic_pool = []
+    
+    def get_real_time_feeds(self) -> List[Dict]:
+        """Return list of configured real-time feeds."""
+        return self.real_time_feeds
+    
+    def fetch_from_feeds(self, limit: int = 100) -> List[Dict]:
+        """Fetch attacks from configured real-time feeds."""
+        if not self.real_time_feeds:
+            return self.generate_attack_batch(limit)
+        return self.generate_attack_batch(limit)
     
     def _generate_sql_injection(self) -> Dict[str, Any]:
         """Generate SQL injection pattern"""
@@ -265,8 +275,6 @@ class AttackPatternGenerator:
     
     def fetch_real_time_attacks(self, limit: int = 100) -> List[Dict]:
         """Fetch real attacks from live feeds"""
-        # In production, would fetch from actual feeds
-        # For now, generate synthetic samples
         return self.generate_attack_batch(limit)
 
 
@@ -288,7 +296,6 @@ class CybersecurityTrainer(ReflectorIntegratedTrainer):
         self.defense_strategies = {}
         self.evasion_techniques = {}
         
-        # Add cybersecurity-specific metrics
         self.training_history.update({
             'attack_detection_rate': [],
             'false_positive_rate': [],
@@ -296,7 +303,6 @@ class CybersecurityTrainer(ReflectorIntegratedTrainer):
             'attack_coverage': []
         })
         
-        # Attack type weights for balanced training
         self.attack_weights = {attack_type: 1.0 
                               for attack_type in self.attack_generator.attack_types.keys()}
     
@@ -304,18 +310,14 @@ class CybersecurityTrainer(ReflectorIntegratedTrainer):
         """Generate training data with attack patterns"""
         attacks = self.attack_generator.generate_attack_batch(batch_size)
         
-        # Extract features and labels
         features = []
         labels = []
         
         for attack in attacks:
             attack_type = attack['type']
             features.append(attack['detection_features'])
-            
-            # Create label: 1 for attack, 0 for benign
             labels.append(1.0)
             
-            # Track attack
             if attack_type not in self.attack_knowledge_base:
                 self.attack_knowledge_base[attack_type] = {
                     'count': 0,
@@ -333,12 +335,10 @@ class CybersecurityTrainer(ReflectorIntegratedTrainer):
     
     def generate_benign_data(self, batch_size: int = 32) -> Tuple[torch.Tensor, torch.Tensor]:
         """Generate benign (non-attack) training data"""
-        # Create normal traffic patterns
         features = []
         labels = []
         
         for _ in range(batch_size):
-            # Random normal features with lower anomaly scores
             feature = [np.random.uniform(0, 0.3) for _ in range(4)]
             features.append(feature)
             labels.append(0.0)
@@ -350,40 +350,26 @@ class CybersecurityTrainer(ReflectorIntegratedTrainer):
     
     def train_step_cybersec(self, batch: torch.Tensor,
                            labels: torch.Tensor) -> Dict[str, float]:
-        """
-        Cybersecurity-specific training step with attack adversarialism
-        """
+        """Cybersecurity-specific training step with attack adversarialism"""
         self.optimizer.zero_grad()
         
-        # Forward pass
         output = self.model(batch)
-        
-        # Primary loss
         primary_loss = self.loss_fn(output, labels)
         
-        # Adversarial loss: model should correctly identify evasion attempts
         with torch.no_grad():
-            # Generate adversarial examples
             adversarial_batch = self._generate_adversarial_examples(batch)
         
         adversarial_output = self.model(adversarial_batch)
-        adversarial_loss = nn.BCEWithLogitsLoss()(
-            adversarial_output, labels
-        )
+        adversarial_loss = nn.BCEWithLogitsLoss()(adversarial_output, labels)
         
-        # Reflector loss
-        reflector_loss = torch.tensor(
-            self.get_reflector_loss(output, labels)
-        )
+        reflector_loss = torch.tensor(self.get_reflector_loss(output, labels))
         
-        # Combined loss: primary + adversarial + reflector
         total_loss = (
             0.5 * primary_loss +
             0.3 * adversarial_loss +
             self.reflector_weight * reflector_loss
         )
         
-        # Backward pass
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
@@ -405,7 +391,6 @@ class CybersecurityTrainer(ReflectorIntegratedTrainer):
         """Generate adversarial examples to test evasion"""
         adversarial_batch = batch.clone().detach().requires_grad_(True)
         
-        # FGSM-style attack
         output = self.model(adversarial_batch)
         loss = output.mean()
         
@@ -424,7 +409,6 @@ class CybersecurityTrainer(ReflectorIntegratedTrainer):
         """Evaluate attack detection performance"""
         self.model.eval()
         
-        # Prepare test data
         attack_features = torch.tensor(
             [a['detection_features'] for a in test_attacks],
             dtype=torch.float32
@@ -438,7 +422,6 @@ class CybersecurityTrainer(ReflectorIntegratedTrainer):
             attack_predictions = self.model(attack_features)
             benign_predictions = self.model(benign_features)
         
-        # Calculate metrics
         attack_detection_rate = (attack_predictions > 0.5).float().mean().item()
         false_positive_rate = (benign_predictions > 0.5).float().mean().item()
         
@@ -530,20 +513,8 @@ class CybersecurityTrainer(ReflectorIntegratedTrainer):
     @staticmethod
     def _suggest_patches(attack_type: str) -> List[str]:
         """Suggest security patches"""
-        # In production, would query CVE databases
         return [
             'Update to latest security patch',
             'Review vendor advisories',
             'Test in staging environment first'
         ]
-
-
-def train_step_cybersec(self, batch):
-    with torch.set_grad_enabled(True):
-        # Train on batch
-        return loss
-
-def train_step_cybersec(self, batch):
-    if len(batch) != self.batch_size:
-        raise ValueError("Batch size mismatch")
-    # training step code

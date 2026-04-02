@@ -402,11 +402,11 @@ class TrainingPanel(tk.Frame):
                 cb.bind("<<ComboboxSelected>>", lambda e: self._update_model_desc())
 
         spinners = [
-            ("Epochs",      "epochs",    50,   1,   500),
-            ("Batch Size",  "batch",     32,   1,   512),
-            ("Hidden Dim",  "hidden",    512,  64,  2048),
-            ("Num Layers",  "layers",    3,    1,   12),
-            ("Num Heads",   "heads",     8,    1,   32),
+            ("Epochs",      "epochs",    20,   1,   500),
+            ("Batch Size",  "batch",     64,   1,   512),
+            ("Hidden Dim",  "hidden",    256,  64,  2048),
+            ("Num Layers",  "layers",    4,    1,   12),
+            ("Num Heads",   "heads",     12,   1,   32),
         ]
         self.spins = {}
         for lbl_text, key, default, lo, hi in spinners:
@@ -433,7 +433,7 @@ class TrainingPanel(tk.Frame):
 
         # Reflector toggle
         ref_row = tk.Frame(cfg_frame, bg=BG_CARD)
-        ref_row.pack(fill="x", padx=8, pady=(3, 4))
+        ref_row.pack(fill="x", padx=8, pady=1)
         tk.Label(ref_row, text="Reflector", fg=TEXT_SEC, bg=BG_CARD,
                  font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
         self.reflector_var = tk.BooleanVar(value=True)
@@ -441,6 +441,30 @@ class TrainingPanel(tk.Frame):
                        fg=TEXT_PRI, selectcolor=BG_INPUT,
                        activebackground=BG_CARD).pack(side="left")
         tk.Label(ref_row, text="Enable auto-correction", fg=TEXT_SEC,
+                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
+
+        # Reasoning Mode toggle (new)
+        reason_row = tk.Frame(cfg_frame, bg=BG_CARD)
+        reason_row.pack(fill="x", padx=8, pady=(1, 4))
+        tk.Label(reason_row, text="Reasoning Mode", fg=TEXT_SEC, bg=BG_CARD,
+                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
+        self.reasoning_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(reason_row, variable=self.reasoning_var, bg=BG_CARD,
+                       fg=TEXT_PRI, selectcolor=BG_INPUT,
+                       activebackground=BG_CARD).pack(side="left")
+        tk.Label(reason_row, text="Train on logic only (Text Gen)", fg=TEXT_SEC,
+                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
+
+        # Seq Len (context length) - critical for text generation
+        seq_row = tk.Frame(cfg_frame, bg=BG_CARD)
+        seq_row.pack(fill="x", padx=8, pady=(1, 4))
+        tk.Label(seq_row, text="Seq Length", fg=TEXT_SEC, bg=BG_CARD,
+                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
+        self.seq_len_var = tk.StringVar(value="128")  # 128 = good default for text gen
+        tk.Entry(seq_row, textvariable=self.seq_len_var, bg=BG_INPUT, fg=TEXT_PRI,
+                 insertbackground=TEXT_PRI, relief="flat",
+                 font=("Segoe UI", 9), width=6).pack(side="left", padx=4)
+        tk.Label(seq_row, text=" chars context (0=auto)", fg=TEXT_SEC,
                  bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
 
         # Model description box
@@ -588,17 +612,20 @@ class TrainingPanel(tk.Frame):
             self._log(f"Config saved → {path}", "ok")
 
     def _get_config(self):
+        seq_len_val = int(self.seq_len_var.get())
         return {
-            "model_type":  self.combos["Model Type"].get(),
-            "optimizer":   self.combos["Optimizer"].get(),
-            "scheduler":   self.combos["Scheduler"].get(),
-            "epochs":      int(self.spins["epochs"].get()),
-            "batch_size":  int(self.spins["batch"].get()),
-            "hidden_dim":  int(self.spins["hidden"].get()),
-            "num_layers":  int(self.spins["layers"].get()),
-            "num_heads":   int(self.spins["heads"].get()),
-            "lr":          float(self.lr_var.get()),
-            "reflector":   self.reflector_var.get(),
+            "model_type":     self.combos["Model Type"].get(),
+            "optimizer":      self.combos["Optimizer"].get(),
+            "scheduler":      self.combos["Scheduler"].get(),
+            "epochs":         int(self.spins["epochs"].get()),
+            "batch_size":     int(self.spins["batch"].get()),
+            "hidden_dim":     int(self.spins["hidden"].get()),
+            "num_layers":     int(self.spins["layers"].get()),
+            "num_heads":      int(self.spins["heads"].get()),
+            "lr":             float(self.lr_var.get()),
+            "seq_len":        seq_len_val if seq_len_val > 0 else 0,
+            "reflector":      self.reflector_var.get(),
+            "reasoning_only": self.reasoning_var.get(),
         }
 
     # ── Training simulation / real run ───────────────────────────────────────
@@ -653,20 +680,26 @@ class TrainingPanel(tk.Frame):
 
         # ── 1. Load text data ─────────────────────────────────────────────────
         try:
-            from text_dataset import build_text_loaders, read_text_files
+            from data.text_dataset import build_text_loaders, read_text_files
 
-            # Auto-size seq_len and batch_size for corpus size
+            # Auto-size seq_len and batch_size for corpus size (can be overridden)
+            # User can set seq_len in config, otherwise auto-detect
+            user_seq_len = cfg.get("seq_len", 0)  # 0 means not set
+            
             corpus_size = sum(
                 Path(f).stat().st_size for f in files if Path(f).exists())
 
-            if corpus_size > 5_000_000:       # > 5 MB (like big.txt)
-                seq_len    = 32               # short context for speed
+            if user_seq_len > 0:
+                # User specified seq_len - use it
+                seq_len = user_seq_len
+            elif corpus_size > 5_000_000:       # > 5 MB (like big.txt)
+                seq_len    = 128               # increased from 32 for better learning
                 batch_size = min(batch_size, 64)
                 self._ui(self._log,
                     f"Large corpus ({corpus_size/1024/1024:.1f} MB) — "
-                    f"using seq_len={seq_len}, batch={batch_size} for speed", "warn")
+                    f"using seq_len={seq_len}, batch={batch_size}", "warn")
             elif corpus_size > 1_000_000:     # > 1 MB
-                seq_len    = 48
+                seq_len    = 96
                 batch_size = min(batch_size, 48)
             elif corpus_size > 200_000:       # > 200 KB
                 seq_len    = 64
@@ -674,11 +707,18 @@ class TrainingPanel(tk.Frame):
                 seq_len = min(cfg["hidden_dim"] // 2, 96)
 
             self._ui(self._log, "Loading text corpus…", "info")
+            
+            # Check for Reasoning Mode
+            reasoning_only = cfg.get("reasoning_only", False)
+            if reasoning_only:
+                self._ui(self._log, "Reasoning Mode: Prioritizing 'Thought:' and logic-rich data", "warn")
+
             train_loader, val_loader, tokenizer, info = build_text_loaders(
-                files, seq_len=seq_len, batch_size=batch_size)
+                files, seq_len=seq_len, batch_size=batch_size, 
+                reasoning_only=reasoning_only)
 
             # Wrap train with prefetch — validation stays simple to avoid thread issues
-            from prefetch_loader import PrefetchLoader
+            from data.prefetch_loader import PrefetchLoader
             train_loader = PrefetchLoader(train_loader, buffer_size=3)
 
             n_batches = info["train_batches"]
@@ -699,8 +739,8 @@ class TrainingPanel(tk.Frame):
             return
 
         # ── 2. Build language model ───────────────────────────────────────────
-        from text_model import lm_train_step, lm_val_loss, save_lm
-        from implementations import HMTLanguageModel
+        from core.text_model import lm_train_step, lm_val_loss, save_lm
+        from core.implementations import HMTLanguageModel
         hidden    = cfg["hidden_dim"]
         num_heads = max(1, min(8, hidden // 64))
         hidden    = (hidden // num_heads) * num_heads
@@ -727,7 +767,7 @@ class TrainingPanel(tk.Frame):
         param_count = model.count_parameters()
 
         # ── Device selection ──────────────────────────────────────────────────
-        from device_manager import get_best_device, move_batch
+        from core.device_manager import get_best_device, move_batch
         device, device_name = get_best_device(
             model_params=param_count, batch_size=batch_size)
         model = model.to(device)
@@ -791,7 +831,14 @@ class TrainingPanel(tk.Frame):
                     break
 
                 xb, yb = move_batch((xb, yb), device)
-                epoch_loss += lm_train_step(model, optimizer, xb, yb)
+                
+                # Enhanced training step with reasoning prioritization
+                loss_val = lm_train_step(
+                    model, optimizer, xb, yb,
+                    reasoning_weight = 2.0 if cfg.get("reasoning_only") else 1.0,
+                    tokenizer = tokenizer
+                )
+                epoch_loss += loss_val
                 step += 1
 
                 # ── Time-based UI update (every 2 seconds) ────────────────
@@ -872,7 +919,7 @@ class TrainingPanel(tk.Frame):
 
         # ── 1. Load images ────────────────────────────────────────────────────
         try:
-            from image_dataset import build_image_loaders
+            from data.image_dataset import build_image_loaders
             self._ui(self._log, "Scanning image folders…", "info")
 
             # Auto img_size from hidden_dim: bigger model → bigger patches ok
@@ -884,9 +931,8 @@ class TrainingPanel(tk.Frame):
             train_loader, val_loader, class_names, info = build_image_loaders(
                 files, img_size=img_size, batch_size=batch_size)
 
-            from prefetch_loader import PrefetchLoader
+            from data.prefetch_loader import PrefetchLoader
             train_loader = PrefetchLoader(train_loader, buffer_size=3)
-            val_loader   = PrefetchLoader(val_loader,   buffer_size=2)
 
             n_classes  = info["num_classes"]
             n_batches  = info["train_batches"]
@@ -902,7 +948,7 @@ class TrainingPanel(tk.Frame):
 
         # ── 2. Build model ────────────────────────────────────────────────────
         try:
-            from implementations import HMTImageClassifier
+            from core.implementations import HMTImageClassifier
             num_heads  = max(1, min(8, hidden // 64))
             hidden     = (hidden // num_heads) * num_heads
             patch_size = 8 if img_size <= 32 else 16
@@ -924,7 +970,7 @@ class TrainingPanel(tk.Frame):
                 f"dim={hidden} | {n_classes} classes", "ok")
 
             # ── Device selection ──────────────────────────────────────────
-            from device_manager import get_best_device, move_batch
+            from core.device_manager import get_best_device, move_batch
             device, device_name = get_best_device(
                 model_params=param_count, batch_size=batch_size)
             model = model.to(device)
@@ -1104,7 +1150,7 @@ class TrainingPanel(tk.Frame):
                    prompt: str = "\n", max_new: int = 60) -> str:
         """Quick sample during training to show progress."""
         try:
-            from text_model import MambaLM
+            from core.text_model import MambaLM
             prompt_ids = tokenizer.encode(prompt)
             new_ids    = model.generate(
                 prompt_ids, max_new=max_new,
@@ -1116,7 +1162,7 @@ class TrainingPanel(tk.Frame):
     def _save_lm_checkpoint(self, cfg, model, best_state,
                              tokenizer, lm_cfg, data_info):
         import torch
-        from text_model import save_lm
+        from core.text_model import save_lm
         save_dir = Path("trained_models")
         save_dir.mkdir(exist_ok=True)
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1160,14 +1206,13 @@ class TrainingPanel(tk.Frame):
 
         # ── 1. Load data ──────────────────────────────────────────────────────
         try:
-            from data_loader import build_loaders
+            from data.data_loader import build_loaders
             self._ui(self._log, "Loading dataset…", "info")
             train_loader, val_loader, data_info = build_loaders(
                 files, batch_size=batch_size, val_split=0.15, num_workers=0)
 
-            from prefetch_loader import PrefetchLoader
+            from data.prefetch_loader import PrefetchLoader
             train_loader = PrefetchLoader(train_loader, buffer_size=3)
-            val_loader   = PrefetchLoader(val_loader,   buffer_size=2)
             feat_dim = data_info["feature_dim"]
             self._ui(self._log,
                 f"Dataset: {data_info['total_rows']} rows | "
@@ -1187,16 +1232,17 @@ class TrainingPanel(tk.Frame):
         hidden = cfg["hidden_dim"]
         layers = cfg["num_layers"]
         mtype  = cfg["model_type"]
+        n_classes = data_info.get("num_classes", 1)
 
         try:
-            model = self._build_model(mtype, feat_dim, hidden, layers)
+            model = self._build_model(mtype, feat_dim, hidden, layers, n_classes)
             param_count = sum(p.numel() for p in model.parameters())
             self._ui(self._log,
                 f"Model: {mtype} | {param_count:,} params | "
                 f"input_dim={feat_dim} hidden={hidden} layers={layers}", "ok")
 
             # ── Device selection ──────────────────────────────────────────
-            from device_manager import get_best_device, move_batch
+            from core.device_manager import get_best_device, move_batch
             device, device_name = get_best_device(
                 model_params=param_count, batch_size=batch_size)
             model = model.to(device)
@@ -1226,7 +1272,13 @@ class TrainingPanel(tk.Frame):
         else:
             scheduler = None
 
-        loss_fn = nn.BCEWithLogitsLoss()
+        is_binary = data_info.get("is_binary", True)
+        num_classes = data_info.get("num_classes", 1)
+        if is_binary:
+            loss_fn = nn.BCEWithLogitsLoss()
+        else:
+            loss_fn = nn.CrossEntropyLoss()
+            self._ui(self._log, f"Multi-class ({num_classes} classes) using CrossEntropyLoss", "info")
 
         # ── 4. Training loop ──────────────────────────────────────────────────
         best_val_loss = float("inf")
@@ -1240,6 +1292,7 @@ class TrainingPanel(tk.Frame):
             model.train()
             epoch_loss = 0.0
             correct = total = 0
+            refl_conf = 0.0
             n_batches    = len(train_loader)
             update_every = max(5, n_batches // 20)
 
@@ -1249,13 +1302,19 @@ class TrainingPanel(tk.Frame):
                 xb, yb = move_batch((xb, yb), device)
                 optimizer.zero_grad()
                 out  = model(xb)
-                loss = loss_fn(out, yb)
+                if is_binary:
+                    loss = loss_fn(out, yb)
+                    preds = (torch.sigmoid(out) > 0.5).squeeze()
+                    correct += (preds.long() == yb.long().squeeze()).sum().item()
+                else:
+                    yb_long = yb.long().squeeze() if yb.dim() > 1 else yb.long()
+                    loss = loss_fn(out, yb_long)
+                    preds = out.argmax(dim=1)
+                    correct += (preds == yb_long).sum().item()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 epoch_loss += loss.item()
-                preds   = (torch.sigmoid(out) > 0.5).float()
-                correct += (preds == yb).sum().item()
                 total   += yb.numel()
 
                 # ── Real-time UI update ───────────────────────────────────
@@ -1275,7 +1334,10 @@ class TrainingPanel(tk.Frame):
                     if cfg["reflector"]:
                         try:
                             with torch.no_grad():
-                                sig = torch.sigmoid(out)
+                                if is_binary:
+                                    sig = torch.sigmoid(out)
+                                else:
+                                    sig = torch.softmax(out, dim=-1)
                                 refl_conf = float(
                                     (sig.max(dim=0).values.mean() +
                                      (1 - sig.min(dim=0).values.mean())) / 2)
@@ -1301,9 +1363,15 @@ class TrainingPanel(tk.Frame):
                     for xv, yv in val_loader:
                         xv, yv = move_batch((xv, yv), device)
                         ov = model(xv)
-                        val_loss += loss_fn(ov, yv).item()
-                        pv = (torch.sigmoid(ov) > 0.5).float()
-                        val_correct += (pv == yv).sum().item()
+                        if is_binary:
+                            val_loss += loss_fn(ov, yv).item()
+                            pv = (torch.sigmoid(ov) > 0.5).squeeze()
+                            val_correct += (pv.long() == yv.long().squeeze()).sum().item()
+                        else:
+                            yv_long = yv.long().squeeze() if yv.dim() > 1 else yv.long()
+                            val_loss += loss_fn(ov, yv_long).item()
+                            pv = ov.argmax(dim=1)
+                            val_correct += (pv == yv_long).sum().item()
                         val_total   += yv.numel()
                 val_loss /= len(val_loader)
                 val_acc   = val_correct / max(val_total, 1)
@@ -1332,24 +1400,28 @@ class TrainingPanel(tk.Frame):
         self._ui(self._finish_training)
 
     def _ui(self, fn, *args):
-        self.after(0, fn, *args)
+        """Thread-safe UI update helper with safety check."""
+        try:
+            if self.winfo_exists():
+                self.after(0, fn, *args)
+        except Exception:
+            pass # application or widget already destroyed
 
     def _build_model(self, mtype: str, feat_dim: int,
-                     hidden: int, layers: int):
+                     hidden: int, layers: int, num_classes: int = 1):
         """
         Build a real model using the HierarchicalMambaTransformer backbone.
         All types use the same backbone — only the head differs.
         """
         import torch.nn as nn
-        from implementations import HMTClassifier
+        from core.implementations import HMTClassifier
 
-        num_heads = max(1, min(8, hidden // 64))  # ensure divisible
-        # round hidden to nearest multiple of num_heads
+        num_heads = max(1, min(8, hidden // 64))
         hidden = (hidden // num_heads) * num_heads
 
         return HMTClassifier(
             input_dim   = feat_dim,
-            num_classes = 1,
+            num_classes = num_classes,
             dim         = hidden,
             num_layers  = layers,
             num_heads   = num_heads,
@@ -1499,6 +1571,7 @@ class ModelManagerPanel(tk.Frame):
             side="left")
 
     def _refresh(self):
+        if not self.winfo_exists(): return
         self.models = []
         save_dir = Path("trained_models")
         if save_dir.exists():
@@ -1532,6 +1605,7 @@ class ModelManagerPanel(tk.Frame):
         self.sum_vars["training"].set(str(training))
 
     def _on_select(self, _=None):
+        if not self.winfo_exists(): return
         sel = self.tree.selection()
         if not sel:
             return
@@ -1615,6 +1689,14 @@ class InferenceWindow(tk.Toplevel):
         self.minsize(680, 560)
         self._result = None
         self._build()
+
+    def _ui(self, fn, *args):
+        """Thread-safe UI update helper with safety check."""
+        try:
+            if self.winfo_exists():
+                self.after(0, fn, *args)
+        except Exception:
+            pass
 
     def _build(self):
         # ── Header ──
@@ -1788,7 +1870,7 @@ class InferenceWindow(tk.Toplevel):
             self._write("Running inference…\n", "section")
             def _worker():
                 try:
-                    from inference import load_checkpoint, run_inference, save_results
+                    from utils.inference import load_checkpoint, run_inference, save_results
                     wf = self.model_meta["weights_file"]
                     model, config, data_info = load_checkpoint(wf)
                     results = run_inference(model, data_info, data_path,
@@ -1798,15 +1880,15 @@ class InferenceWindow(tk.Toplevel):
                                            data_path)
                     else:
                         out = None
-                    self.after(0, self._show_results, results, out)
+                    self._ui(self._show_results, results, out)
                 except Exception as e:
-                    self.after(0, self._show_error, str(e))
+                    self._ui(self._show_error, str(e))
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _run_lm_inference(self):
         """Generate text from a trained language model."""
-        from text_model import load_lm
+        from core.text_model import load_lm
         wf     = self.model_meta["weights_file"]
         model, tokenizer = load_lm(wf)
         prompt = self._prompt_var.get() if hasattr(self, "_prompt_var") else "\n"
@@ -1831,7 +1913,7 @@ class InferenceWindow(tk.Toplevel):
             prompt_ids, max_new=n_new,
             temperature=temp, top_k=topk)
         generated  = tokenizer.decode(new_ids)
-        self.after(0, self._show_lm_output, prompt, generated)
+        self._ui(self._show_lm_output, prompt, generated)
 
     def _show_lm_output(self, prompt: str, generated: str):
         self.run_btn.config(state="normal")
@@ -2004,14 +2086,25 @@ class HealthPanel(tk.Toplevel):
 # ─── Main Application Window ──────────────────────────────────────────────────
 
 class TrainingApp(tk.Tk):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, skip_init=False):
+        if not skip_init:
+            super().__init__()
         self.title("ML Training System — Hierarchical Mamba + Transformer")
         self.configure(bg=BG_DARK)
         self.geometry("1400x860")
         self.minsize(1100, 700)
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
         self._build_titlebar()
         self._build_body()
+
+    def _on_closing(self):
+        """Ensure all background threads stop before exiting."""
+        if hasattr(self, "train_panel") and self.train_panel.running:
+            self.train_panel._stop()
+            # Wait briefly for thread to acknowledge stop
+            self.after(200, self.destroy)
+        else:
+            self.destroy()
 
     def _build_titlebar(self):
         bar = tk.Frame(self, bg=BG_PANEL, height=48)
@@ -2073,7 +2166,7 @@ class TrainingApp(tk.Tk):
 
     def _open_upgrade_window(self):
         try:
-            from upgrade_window import AutoUpgradeWindow
+            from ui.upgrade_window import AutoUpgradeWindow
             # Try to get upgrade system from start.py if available
             upgrade_sys = getattr(self, "_upgrade_system", None)
             AutoUpgradeWindow(self, upgrade_sys)
@@ -2096,7 +2189,7 @@ if __name__ == "__main__":
         class TrainingAppDnD(TrainingApp, TkinterDnD.Tk):
             def __init__(self):
                 TkinterDnD.Tk.__init__(self)
-                TrainingApp.__init__(self)
+                TrainingApp.__init__(self, skip_init=True)
         app = TrainingAppDnD()
     except ImportError:
         app = TrainingApp()

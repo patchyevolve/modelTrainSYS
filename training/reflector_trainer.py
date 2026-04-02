@@ -15,9 +15,9 @@ from dataclasses import dataclass
 
 # Support both flat-file execution and package import
 try:
-    from .architecture import Reflector, Trainer, ModuleConfig, ComponentType
+    from core.architecture import Reflector, Trainer, ModuleConfig, ComponentType
 except ImportError:
-    from architecture import Reflector, Trainer, ModuleConfig, ComponentType
+    from .architecture import Reflector, Trainer, ModuleConfig, ComponentType
 
 log = logging.getLogger("Reflector")
 
@@ -219,7 +219,7 @@ class EnsembleReflector(Reflector):
         if self.voting_strategy == 'majority':
             final_output = torch.stack(results).mean(dim=0)
         else:  # weighted
-            weights = torch.tensor(confidences).softmax(dim=0)
+            weights = torch.softmax(torch.tensor(confidences, dtype=torch.float32), dim=0)
             final_output = sum(r * w for r, w in zip(results, weights))
         
         metadata = {

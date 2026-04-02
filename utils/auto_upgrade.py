@@ -24,20 +24,9 @@ from copy import deepcopy
 
 # Support both flat-file execution and package import
 try:
-    from .architecture import SelfTransformer, ModuleConfig
+    from core.architecture import SelfTransformer, ModuleConfig
 except ImportError:
-    import sys, importlib.util
-    from pathlib import Path
-    _arch = sys.modules.get("mlsystem.core.architecture") or \
-            importlib.util.spec_from_file_location(
-                "architecture", Path(__file__).parent / "architecture.py"
-            )
-    if hasattr(_arch, "loader"):
-        _m = importlib.util.module_from_spec(_arch)
-        _arch.loader.exec_module(_m)
-        sys.modules["architecture"] = _m
-        _arch = _m
-    from architecture import SelfTransformer, ModuleConfig
+    from .architecture import SelfTransformer, ModuleConfig
 
 log = logging.getLogger("AutoUpgrade")
 

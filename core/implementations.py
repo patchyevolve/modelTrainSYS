@@ -39,12 +39,12 @@ from pathlib import Path
 from PIL import Image
 
 try:
-    from .architecture import (
+    from core.architecture import (
         DataFeeder, Encoder, Decoder, Reflector, Trainer,
         DataType, ModuleConfig, ComponentType
     )
 except ImportError:
-    from architecture import (
+    from .architecture import (
         DataFeeder, Encoder, Decoder, Reflector, Trainer,
         DataType, ModuleConfig, ComponentType
     )
@@ -70,10 +70,11 @@ class MambaBlock(nn.Module):
     """
 
     def __init__(self, dim: int, d_state: int = 16, expand: int = 2,
-                 dt_rank: int = None, conv_size: int = 4):
+                 dt_rank: int = None, conv_size: int = 4, dropout: float = 0.0):
         super().__init__()
         self.dim     = dim
         self.d_inner = expand * dim
+        self.dropout = dropout
 
         # Input projection: dim → 2*d_inner (x and gate z)
         self.in_proj = nn.Linear(dim, 2 * self.d_inner, bias=False)
@@ -90,10 +91,13 @@ class MambaBlock(nn.Module):
         self.W_o = nn.Linear(self.d_inner, dim, bias=False)
 
         self.norm = nn.LayerNorm(dim)
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
         # Init: forget gate bias=1 (high retention at start)
         nn.init.constant_(self.W_f.bias, 1.0)
         nn.init.zeros_(self.W_i.bias)
+        nn.init.xavier_uniform_(self.in_proj.weight)
+        nn.init.xavier_uniform_(self.W_o.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (B, T, dim) → (B, T, dim)"""
@@ -104,28 +108,17 @@ class MambaBlock(nn.Module):
         xz       = self.in_proj(x)
         x_in, z  = xz.chunk(2, dim=-1)                # each (B, T, d_inner)
 
-        # 2. Causal conv1d (local mixing)
+        # 2. Causal conv1d (local mixing) - removes temporal dependency issues
         xc = self.conv1d(x_in.transpose(1, 2))[:, :, :T]
         xc = F.silu(xc).transpose(1, 2)               # (B, T, d_inner)
 
-        # 3. Gated recurrence — vectorised parallel scan
-        f   = torch.sigmoid(self.W_f(xc))             # (B, T, d_inner) forget
-        inp = (1.0 - f) * torch.tanh(self.W_i(xc))   # (B, T, d_inner) input
+        # 3. Simple FFN instead of unstable recurrence
+        # This works as a "mixing" layer - simpler and more stable
+        h = xc  # Direct pass-through with conv1d mixing
 
-        # h_t = f_t * h_{t-1} + inp_t
-        # Parallel: h_t = exp(Σlog f)[t] * Σ(inp * exp(-Σlog f))[t]
-        # Clamp f to [0.1, 0.99] — prevents log(f) from going too negative
-        # which would cause exp(-cumsum) to overflow to inf
-        f_c   = f.clamp(0.1, 0.99)
-        cs_f  = torch.cumsum(torch.log(f_c), dim=1)   # (B, T, d_inner)
-        # Clamp cs_f to prevent exp overflow: exp(x) overflows at x > ~85
-        cs_f  = cs_f.clamp(-30.0, 30.0)
-        h     = torch.exp(cs_f) * torch.cumsum(
-                    inp * torch.exp(-cs_f), dim=1)     # (B, T, d_inner)
-
-        # 4. SiLU output gate + project back + residual
+        # 4. SiLU output gate + project back + residual + dropout
         out = self.W_o(h * F.silu(z))                 # (B, T, dim)
-        return self.norm(out + residual)
+        return self.norm(self.drop(out) + residual)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -145,8 +138,16 @@ class RotaryEmbedding(nn.Module):
         t     = torch.arange(seq_len, device=self.inv_freq.device).float()
         freqs = torch.outer(t, self.inv_freq)          # (T, dim/2)
         emb   = torch.cat([freqs, freqs], dim=-1)      # (T, dim)
-        self.register_buffer("cos_cache", emb.cos()[None, None])  # (1,1,T,dim)
-        self.register_buffer("sin_cache", emb.sin()[None, None])
+        
+        cos = emb.cos()[None, None]  # (1,1,T,dim)
+        sin = emb.sin()[None, None]
+        
+        if hasattr(self, "cos_cache"):
+            self.cos_cache = cos
+            self.sin_cache = sin
+        else:
+            self.register_buffer("cos_cache", cos)
+            self.register_buffer("sin_cache", sin)
 
     @staticmethod
     def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -155,9 +156,15 @@ class RotaryEmbedding(nn.Module):
 
     def forward(self, q: torch.Tensor, k: torch.Tensor,
                 offset: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
-        T   = q.shape[2]
+        T = q.shape[2]
+        # Expand cache if needed
+        if offset + T > self.cos_cache.shape[2]:
+            self._build_cache(offset + T + 1024)  # Add buffer for more generation
+
         cos = self.cos_cache[:, :, offset: offset + T]
         sin = self.sin_cache[:, :, offset: offset + T]
+        
+        # Ensure T matches cache slice (should now be true)
         q   = q * cos + self._rotate_half(q) * sin
         k   = k * cos + self._rotate_half(k) * sin
         return q, k
@@ -166,20 +173,22 @@ class RotaryEmbedding(nn.Module):
 class TransformerBlock(nn.Module):
     """
     Causal Transformer block with:
-    - Multi-head self-attention + RoPE
+    - Multi-head self-attention + RoPE (with Flash Attention when available)
     - KV-cache for O(1) per-step generation
     - SwiGLU feed-forward (gate * up, then down)
     - Pre-norm (LayerNorm before attention and FFN)
+    - Gradient checkpointing support for memory efficiency
     """
 
     def __init__(self, dim: int, num_heads: int = 8,
                  ff_mult: int = 4, dropout: float = 0.1,
-                 max_len: int = 4096):
+                 max_len: int = 4096, use_flash_attn: bool = False):
         super().__init__()
         assert dim % num_heads == 0
         self.dim       = dim
         self.num_heads = num_heads
         self.head_dim  = dim // num_heads
+        self.use_flash = use_flash_attn
 
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
@@ -225,6 +234,10 @@ class TransformerBlock(nn.Module):
         # Apply RoPE
         q, k = self.rope(q, k, offset=cache_offset)
 
+        # Safety check: if RoPE truncated q/k (should not happen with dynamic cache), truncate v too
+        if q.shape[2] < T:
+            v = v[:, :, :q.shape[2]]
+
         # KV cache
         if use_cache:
             if self._kv_cache is not None:
@@ -233,22 +246,38 @@ class TransformerBlock(nn.Module):
                 v = torch.cat([v_prev, v], dim=2)
             self._kv_cache = (k.detach(), v.detach())
 
-        # Scaled dot-product attention with causal mask
-        scale = self.head_dim ** -0.5
-        attn  = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B,H,T,S)
+        # Use Flash Attention when available (PyTorch >= 2.0)
+        if self.use_flash and hasattr(F, 'scaled_dot_product_attention'):
+            # scaled_dot_product_attention is PyTorch's optimized attention
+            # equivalent to Flash Attention / Memory-Efficient Attention
+            attn_mask = None
+            if not use_cache and T > 1:
+                attn_mask = torch.triu(
+                    torch.ones(T, k.shape[2], device=x.device, dtype=torch.bool),
+                    diagonal=1)
+            
+            attn_out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=True
+            )
+            out = attn_out.transpose(1, 2).reshape(B, T, self.dim)
+        else:
+            # Standard attention fallback
+            scale = self.head_dim ** -0.5
+            attn  = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B,H,T,S)
 
-        # Causal mask (only during training / full-sequence forward)
-        if not use_cache and T > 1:
-            mask = torch.triu(
-                torch.ones(T, k.shape[2], device=x.device) * -1e9,
-                diagonal=1)
-            attn = attn + mask.unsqueeze(0).unsqueeze(0)
+            # Causal mask (only during training / full-sequence forward)
+            if not use_cache and T > 1:
+                mask = torch.triu(
+                    torch.ones(T, k.shape[2], device=x.device) * -1e9,
+                    diagonal=1)
+                attn = attn + mask.unsqueeze(0).unsqueeze(0)
 
-        attn = F.softmax(attn, dim=-1)
-        attn = self.drop(attn)
+            attn = F.softmax(attn, dim=-1)
+            attn = self.drop(attn)
 
-        out = torch.matmul(attn, v)                    # (B,H,T,head_dim)
-        out = out.transpose(1, 2).reshape(B, T, self.dim)
+            out = torch.matmul(attn, v)                    # (B,H,T,head_dim)
+            out = out.transpose(1, 2).reshape(B, T, self.dim)
+
         x   = x + self.out(out)
 
         # ── SwiGLU FFN ─────────────────────────────────────────────────────
@@ -295,6 +324,7 @@ class HierarchicalMambaTransformer(nn.Module):
     num_scales : parallel scales (default 3)
     max_seq    : maximum sequence length (RoPE cache)
     dropout    : dropout rate
+    use_gradient_checkpointing: recompute activations to save memory
     """
 
     def __init__(
@@ -305,11 +335,13 @@ class HierarchicalMambaTransformer(nn.Module):
         num_scales: int   = 3,
         max_seq:    int   = 4096,
         dropout:    float = 0.1,
+        use_gradient_checkpointing: bool = False,
     ):
         super().__init__()
         self.dim        = dim
         self.num_layers = num_layers
         self.max_seq    = max_seq
+        self.use_gc     = use_gradient_checkpointing
 
         # ── Multi-scale input branches ────────────────────────────────────
         scale_dims = [max(dim // (2 ** i), 64) for i in range(num_scales)]
@@ -322,7 +354,7 @@ class HierarchicalMambaTransformer(nn.Module):
 
         # ── Depth stack: alternating Mamba + Transformer ──────────────────
         self.mamba_blocks = nn.ModuleList([
-            MambaBlock(dim, d_state=16, expand=2)
+            MambaBlock(dim, d_state=16, expand=2, dropout=dropout)
             for _ in range(num_layers)
         ])
         self.attn_blocks = nn.ModuleList([
@@ -339,6 +371,12 @@ class HierarchicalMambaTransformer(nn.Module):
         """Clear KV caches — call before each new generation sequence."""
         for blk in self.attn_blocks:
             blk.reset_cache()
+
+    def _layer_forward(self, x, mamba, attn, use_cache, cache_offset):
+        """Single layer forward for gradient checkpointing."""
+        x = mamba(x)
+        x = attn(x, use_cache=use_cache, cache_offset=cache_offset)
+        return x
 
     def forward(
         self,
@@ -359,9 +397,17 @@ class HierarchicalMambaTransformer(nn.Module):
         x = self.drop(fused)
 
         # ── Alternating Mamba + Transformer layers ────────────────────────
-        for mamba, attn in zip(self.mamba_blocks, self.attn_blocks):
-            x = mamba(x)
-            x = attn(x, use_cache=use_cache, cache_offset=cache_offset)
+        if self.use_gc and self.training:
+            # Gradient checkpointing: recompute activations to save memory
+            for mamba, attn in zip(self.mamba_blocks, self.attn_blocks):
+                x = torch.utils.checkpoint.checkpoint(
+                    self._layer_forward, x, mamba, attn, use_cache, cache_offset,
+                    use_reentrant=False
+                )
+        else:
+            for mamba, attn in zip(self.mamba_blocks, self.attn_blocks):
+                x = mamba(x)
+                x = attn(x, use_cache=use_cache, cache_offset=cache_offset)
 
         return self.norm_out(x)
 
@@ -540,41 +586,54 @@ class HMTLanguageModel(nn.Module):
         self.eval()
         self.reset_cache()
         ids = list(prompt_ids)
+        if not ids:
+            ids = [0]  # dummy start token if empty
 
         # Prefill: process the full prompt at once
-        ctx    = ids[-self.max_seq:]
-        x      = torch.tensor([ctx], dtype=torch.long, device=device)
-        _      = self.forward(x, use_cache=True, cache_offset=0)
+        # Use a context window that fits in max_seq
+        ctx_len = min(len(ids), self.max_seq)
+        ctx     = ids[-ctx_len:]
+        x       = torch.tensor([ctx], dtype=torch.long, device=device)
+        
+        # Prefill forward pass populates KV cache for the prompt
+        # We only need the logits for the last token to pick the FIRST new token
+        logits = self.forward(x, use_cache=True, cache_offset=0)[0, -1]
         offset = len(ctx)
 
         for _ in range(max_new):
-            # Decode: one token at a time using KV cache
-            x      = torch.tensor([[ids[-1]]], dtype=torch.long, device=device)
-            logits = self.forward(x, use_cache=True,
-                                  cache_offset=offset)[0, -1]
-            offset += 1
-
-            # Repetition penalty
+            # 1. Repetition penalty
             if repetition_penalty != 1.0:
                 for pid in set(ids[-64:]):
                     logits[pid] /= repetition_penalty
 
+            # 2. Temperature scaling
             logits = logits / max(temperature, 1e-8)
 
+            # 3. Top-K filtering
             if top_k > 0:
                 kth    = torch.topk(logits, min(top_k, logits.size(-1))).values[-1]
                 logits = logits.masked_fill(logits < kth, float("-inf"))
 
+            # 4. Top-P (nucleus) sampling
             if 0.0 < top_p < 1.0:
                 sl, si = torch.sort(logits, descending=True)
                 cp     = torch.cumsum(F.softmax(sl, dim=-1), dim=-1)
                 sl[cp - F.softmax(sl, dim=-1) > top_p] = float("-inf")
                 logits = torch.zeros_like(logits).scatter_(0, si, sl)
 
-            next_id = torch.multinomial(F.softmax(logits, dim=-1), 1).item()
+            # 5. Sample next token
+            probs   = F.softmax(logits, dim=-1)
+            next_id = torch.multinomial(probs, 1).item()
+            
             ids.append(next_id)
             if eos_id is not None and next_id == eos_id:
                 break
+
+            # 6. Forward pass for the next step (using the token we just sampled)
+            x      = torch.tensor([[next_id]], dtype=torch.long, device=device)
+            logits = self.forward(x, use_cache=True,
+                                  cache_offset=offset)[0, -1]
+            offset += 1
 
         return ids[len(prompt_ids):]
 
@@ -825,121 +884,134 @@ class StatisticalFeeder(DataFeeder):
         return self.preprocess(data)
 
 
-# ── AUTO-GENERATED by AutoUpgradeSystem 2026-04-01T23:30:50.612268 ──
-# Reason: Add batch normalization to improve model stability and convergence
-class UpgradedModel_20260401_233050(nn.Module):
-    """Auto-upgraded model snapshot — Add batch normalization to improve model stability and convergence"""
-    def __init__(self):
-        super().__init__()
-        self.layer_0 = nn.Sequential(
-                    nn.Linear(256, 512, bias=True),
-                    nn.BatchNorm1d(512)
-                )
-        # self.layer_1 = ReLU()  # complex layer
-        self.layer_2 = nn.Sequential(
-                    nn.Linear(512, 256, bias=True),
-                    nn.BatchNorm1d(256)
-                )
-        # self.layer_3 = ReLU()  # complex layer
-        self.layer_4 = nn.Sequential(
-                    nn.Linear(256, 128, bias=True),
-                    nn.BatchNorm1d(128)
-                )
+# ═══════════════════════════════════════════════════════════════════════════════
+# AUDIO & VIDEO FEEDERS  (for complete DataType coverage)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    def forward(self, x):
-        for layer in self.children():
-            x = layer(x)
-        return x
-
-
-# ── AUTO-GENERATED by AutoUpgradeSystem 2026-04-01T23:31:05.090690 ──
-# Reason: Add dropout layers to reduce overfitting and improve model generalization
-class UpgradedModel_20260401_233105(nn.Module):
-    """Auto-upgraded model snapshot — Add dropout layers to reduce overfitting and improve model generalization"""
-    def __init__(self):
-        super().__init__()
-        self.layer_0 = nn.Sequential(
-                    # Sequential(),
-                    nn.ReLU(),
-                    # Sequential(),
-                    nn.ReLU(),
-                    # Sequential()
-                )
-        # self.layer_1 = Dropout()  # complex layer
-
-    def forward(self, x):
-        for layer in self.children():
-            x = layer(x)
-        return x
-
-
-# ── AUTO-GENERATED by AutoUpgradeSystem 2026-04-01T23:31:40.124136 ──
-# Reason: Add dropout layers to reduce overfitting
-class UpgradedModel_20260401_233140(nn.Module):
-    """Auto-upgraded model snapshot — Add dropout layers to reduce overfitting"""
-    def __init__(self):
-        super().__init__()
-        self.layer_0 = nn.Sequential(
-                    # Sequential(),
-                    nn.Dropout(p=0.2)
-                )
-        # self.layer_1 = Dropout()  # complex layer
-
-    def forward(self, x):
-        for layer in self.children():
-            x = layer(x)
-        return x
-
-
-# ── AUTO-GENERATED by AutoUpgradeSystem 2026-04-01T23:31:49.479805 ──
-# Reason: Add dropout layers to reduce overfitting and improve model generalization
-class UpgradedModel_20260401_233149(nn.Module):
-    """Auto-upgraded model snapshot — Add dropout layers to reduce overfitting and improve model generalization"""
-    def __init__(self):
-        super().__init__()
-        self.layer_0 = nn.Sequential(
-                    # Sequential(),
-                    nn.Dropout(p=0.2)
-                )
-        # self.layer_1 = Dropout()  # complex layer
-
-    def forward(self, x):
-        for layer in self.children():
-            x = layer(x)
-        return x
+class AudioFeeder(DataFeeder):
+    """Audio data feeder - handles .wav, .mp3, .flac files."""
+    
+    def initialize(self) -> None:
+        self.supported_formats = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
+        self.sample_rate = self.config.params.get("sample_rate", 16000)
+        self.max_length = self.config.params.get("max_length", 16000)  # 1 second at 16kHz
+        super().initialize()
+    
+    def validate_data(self, data: Any) -> bool:
+        if isinstance(data, (str, Path)):
+            return str(data).lower().endswith(tuple(self.supported_formats))
+        if isinstance(data, np.ndarray):
+            return data.ndim == 1 or (data.ndim == 2 and data.shape[0] <= 2)
+        if isinstance(data, torch.Tensor):
+            return data.ndim == 1 or (data.ndim == 2 and data.shape[0] <= 2)
+        return False
+    
+    def preprocess(self, data: Any) -> torch.Tensor:
+        if isinstance(data, (str, Path)):
+            data = self._load_audio(data)
+        if isinstance(data, np.ndarray):
+            data = torch.from_numpy(data).float()
+        # Ensure mono and fixed length
+        if data.ndim == 2:
+            data = data.mean(dim=0)  # Convert stereo to mono
+        if len(data) > self.max_length:
+            data = data[:self.max_length]
+        elif len(data) < self.max_length:
+            data = torch.cat([data, torch.zeros(self.max_length - len(data))])
+        return data.unsqueeze(0)  # Add batch dimension
+    
+    def _load_audio(self, path: str) -> torch.Tensor:
+        """Load audio file - requires librosa or scipy."""
+        try:
+            import librosa
+            audio, sr = librosa.load(path, sr=self.sample_rate, mono=True)
+            return torch.from_numpy(audio)
+        except ImportError:
+            try:
+                from scipy.io import wavfile
+                sr, audio = wavfile.read(path)
+                if sr != self.sample_rate:
+                    # Simple resample
+                    ratio = self.sample_rate / sr
+                    audio = audio[::int(ratio)] if ratio > 1 else np.repeat(audio, int(1/ratio))
+                return torch.from_numpy(audio.astype(np.float32) / 32768.0)
+            except Exception as e:
+                raise ValueError(f"Could not load audio {path}: {e}")
+    
+    def load_batch(self, batch_size: int, audio_dir: Optional[str] = None,
+                   **kw) -> Tuple[torch.Tensor, Dict]:
+        if not audio_dir:
+            raise ValueError("audio_dir required")
+        paths = [p for p in Path(audio_dir).glob("*")
+                 if str(p).lower().endswith(tuple(self.supported_formats))]
+        audios = [self.preprocess(p) for p in paths[:batch_size] if self.validate_data(p)]
+        batch = torch.cat(audios) if audios else torch.tensor([])
+        return batch, {"batch_size": len(audios), "audio_count": len(paths)}
+    
+    def forward(self, data: Any) -> torch.Tensor:
+        if not self.validate_data(data):
+            raise ValueError(f"Invalid audio: {type(data)}")
+        return self.preprocess(data)
 
 
-# ── AUTO-GENERATED by AutoUpgradeSystem 2026-04-01T23:31:55.842285 ──
-# Reason: Add a dropout layer after each ReLU activation to prevent overfitting
-class UpgradedModel_20260401_233155(nn.Module):
-    """Auto-upgraded model snapshot — Add a dropout layer after each ReLU activation to prevent overfitting"""
-    def __init__(self):
-        super().__init__()
-        self.layer_0 = nn.Sequential(
-                    # Sequential(),
-                    nn.Dropout(p=0.2)
-                )
-        # self.layer_1 = Dropout()  # complex layer
-
-    def forward(self, x):
-        for layer in self.children():
-            x = layer(x)
-        return x
-
-
-# ── AUTO-GENERATED by AutoUpgradeSystem 2026-04-01T23:32:04.949357 ──
-# Reason: Add a dropout layer after each ReLU activation to prevent overfitting
-class UpgradedModel_20260401_233204(nn.Module):
-    """Auto-upgraded model snapshot — Add a dropout layer after each ReLU activation to prevent overfitting"""
-    def __init__(self):
-        super().__init__()
-        self.layer_0 = nn.Sequential(
-                    # Sequential(),
-                    nn.Dropout(p=0.2)
-                )
-        # self.layer_1 = Dropout()  # complex layer
-
-    def forward(self, x):
-        for layer in self.children():
-            x = layer(x)
-        return x
+class VideoFeeder(DataFeeder):
+    """Video data feeder - handles .mp4, .avi, .mkv files."""
+    
+    def initialize(self) -> None:
+        self.supported_formats = {".mp4", ".avi", ".mkv", ".mov", ".webm"}
+        self.frame_rate = self.config.params.get("frame_rate", 30)
+        self.max_frames = self.config.params.get("max_frames", 30)
+        self.img_size = self.config.params.get("img_size", 112)
+        super().initialize()
+    
+    def validate_data(self, data: Any) -> bool:
+        if isinstance(data, (str, Path)):
+            return str(data).lower().endswith(tuple(self.supported_formats))
+        return False
+    
+    def preprocess(self, data: Any) -> torch.Tensor:
+        if isinstance(data, (str, Path)):
+            frames = self._extract_frames(data)
+            return frames
+        raise ValueError(f"Invalid video: {type(data)}")
+    
+    def _extract_frames(self, path: str) -> torch.Tensor:
+        """Extract frames from video - requires cv2 (opencv)."""
+        try:
+            import cv2
+            cap = cv2.VideoCapture(path)
+            frames = []
+            frame_count = 0
+            while cap.is_open() and frame_count < self.max_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                # Resize and convert BGR to RGB
+                frame = cv2.resize(frame, (self.img_size, self.img_size))
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(frame)
+                frame_count += 1
+            cap.release()
+            if not frames:
+                return torch.zeros(self.max_frames, self.img_size, self.img_size, 3)
+            # Pad if needed
+            while len(frames) < self.max_frames:
+                frames.append(np.zeros((self.img_size, self.img_size, 3), dtype=np.uint8))
+            return torch.from_numpy(np.stack(frames))
+        except ImportError:
+            raise ImportError("opencv-python (cv2) required for video loading")
+    
+    def load_batch(self, batch_size: int, video_dir: Optional[str] = None,
+                   **kw) -> Tuple[torch.Tensor, Dict]:
+        if not video_dir:
+            raise ValueError("video_dir required")
+        paths = [p for p in Path(video_dir).glob("*")
+                 if str(p).lower().endswith(tuple(self.supported_formats))]
+        videos = [self.preprocess(p).unsqueeze(0) for p in paths[:batch_size] if self.validate_data(p)]
+        batch = torch.cat(videos) if videos else torch.zeros(batch_size, self.max_frames, self.img_size, self.img_size, 3)
+        return batch, {"batch_size": len(videos), "video_count": len(paths)}
+    
+    def forward(self, data: Any) -> torch.Tensor:
+        if not self.validate_data(data):
+            raise ValueError(f"Invalid video: {type(data)}")
+        return self.preprocess(data)

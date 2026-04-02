@@ -12,6 +12,7 @@ Run via:
   python start.py --chat <model_name_or_pt>  # specific model
 """
 
+import os
 import sys
 import json
 import torch
@@ -126,15 +127,15 @@ class TextGenSession:
     """
     Chat with a trained language model.
     You type a prompt, the model continues writing from it.
+    Supports streaming and reasoning modes.
     """
 
     def __init__(self, pt_path: Path, ckpt: Dict, meta: Dict):
-        from text_model import MambaLM, load_lm
-        from text_dataset import CharTokenizer
-
+        from core.text_model import load_lm
+        
         self.model, self.tokenizer = load_lm(str(pt_path))
-        lm_cfg = ckpt.get("model_config", {})
-        self.seq_len = lm_cfg.get("seq_len", 128)
+        lm_cfg = ckpt.get("model_config") or ckpt.get("config") or {}
+        self.seq_len = lm_cfg.get("seq_len", lm_cfg.get("max_seq", 128))
 
         print(cyan(f"\n  Model   : {pt_path.name}"))
         print(cyan(f"  Type    : Text Generation (MambaLM)"))
@@ -146,12 +147,14 @@ class TextGenSession:
         print(dim("    /temp 0.8     — set temperature (0.1=focused, 1.5=creative)"))
         print(dim("    /topk 40      — set top-k sampling"))
         print(dim("    /len 300      — set max characters to generate"))
+        print(dim("    /reason on/off — enable reasoning (Thought: ...)"))
         print(dim("    /quit         — exit"))
         print()
 
         self.temperature = 0.8
         self.top_k       = 40
         self.max_new     = 300
+        self.reasoning   = False
 
     def run(self):
         print(bold("  Type a prompt and press Enter. The model will continue writing.\n"))
@@ -190,19 +193,62 @@ class TextGenSession:
                 except Exception:
                     print(yellow("  Usage: /len 300"))
                 continue
+            if user.startswith("/reason"):
+                try:
+                    val = user.split()[1].lower()
+                    self.reasoning = (val == "on" or val == "true")
+                    print(dim(f"  reasoning = {self.reasoning}"))
+                except Exception:
+                    print(yellow("  Usage: /reason on/off"))
+                continue
+
+            # Reasoning mode: inject "Thought:" prefix
+            full_prompt = user
+            if self.reasoning:
+                if "Thought:" not in user:
+                    full_prompt = f"Question: {user}\nThought:"
+                print(dim("  Reasoning…"))
 
             # Generate
             print(green("  Model › "), end="", flush=True)
-            prompt_ids = self.tokenizer.encode(user)
-            new_ids    = self.model.generate(
-                prompt_ids,
-                max_new     = self.max_new,
-                temperature = self.temperature,
-                top_k       = self.top_k,
-            )
-            generated = self.tokenizer.decode(new_ids)
-            print(green(generated))
-            print()
+            prompt_ids = self.tokenizer.encode(full_prompt)
+            
+            # Simple streaming generation
+            self.model.eval()
+            self.model.reset_cache()
+            
+            # Prefill
+            ctx_len = min(len(prompt_ids), self.model.max_seq)
+            ctx     = prompt_ids[-ctx_len:]
+            x       = torch.tensor([ctx], dtype=torch.long)
+            logits  = self.model(x, use_cache=True, cache_offset=0)[0, -1]
+            offset  = len(ctx)
+            
+            ids = list(prompt_ids)
+            for _ in range(self.max_new):
+                # Sample
+                logits = logits / max(self.temperature, 1e-8)
+                if self.top_k > 0:
+                    kth    = torch.topk(logits, min(self.top_k, logits.size(-1))).values[-1]
+                    logits = logits.masked_fill(logits < kth, float("-inf"))
+                
+                probs   = F.softmax(logits, dim=-1)
+                next_id = torch.multinomial(probs, 1).item()
+                
+                # Decode and print
+                char = self.tokenizer.decode([next_id], skip_special=True)
+                print(green(char), end="", flush=True)
+                
+                ids.append(next_id)
+                if next_id == 3: # EOS
+                    break
+                    
+                # Forward for next step
+                x      = torch.tensor([[next_id]], dtype=torch.long)
+                logits = self.model(x, use_cache=True, cache_offset=offset)[0, -1]
+                offset += 1
+            
+            print("\n")
 
 
 class CybersecuritySession:
@@ -297,7 +343,7 @@ class CybersecuritySession:
     def _groq_parse(self, description: str):
         """Ask Groq to extract feature values from a plain-text description."""
         try:
-            from reflector_trainer import _groq_chat
+            from training.reflector_trainer import _groq_chat
             prompt = f"""Extract network session features from this description and return ONLY a JSON object.
 Description: {description}
 
@@ -474,23 +520,34 @@ class ClassifierSession:
             print(yellow("  Could not parse row."))
 
     def _predict(self, values):
+        import torch.nn.functional as F
         feat = list(values)[:self.feat_dim]
         while len(feat) < self.feat_dim:
             feat.append(0.0)
 
         x = torch.tensor([feat], dtype=torch.float32)
         with torch.no_grad():
-            logit = self.model(x)
-            prob  = torch.sigmoid(logit).item()
-
-        label = "Class 1" if prob >= 0.5 else "Class 0"
-        conf  = prob if prob >= 0.5 else 1 - prob
-        color = yellow if prob >= 0.5 else green
-
-        print()
-        print(color(f"  Prediction : {label}  ({conf*100:.1f}% confidence)"))
-        print(color(f"  Probability: {prob:.4f}"))
-        print()
+            logits = self.model(x)
+            if self.is_binary:
+                prob  = torch.sigmoid(logits).item()
+                label = "Class 1" if prob >= 0.5 else "Class 0"
+                conf  = prob if prob >= 0.5 else 1 - prob
+                color = yellow if prob >= 0.5 else green
+                print()
+                print(color(f"  Prediction : {label}  ({conf*100:.1f}% confidence)"))
+                print(color(f"  Probability: {prob:.4f}"))
+            else:
+                probs = F.softmax(logits, dim=-1)[0]
+                top_idx = probs.argmax().item()
+                top_prob = probs[top_idx].item()
+                label = f"Class {top_idx}"
+                print()
+                print(green(f"  Prediction : {label}  ({top_prob*100:.1f}% confidence)"))
+                if self.n_classes <= 10:
+                    print(green(f"  All classes:"))
+                    for i, p in enumerate(probs.tolist()):
+                        print(green(f"    Class {i}: {p*100:5.1f}%"))
+            print()
 
     def _show_info(self):
         cfg = self.meta.get("config", {})
@@ -511,7 +568,7 @@ class ImageSession:
     """
 
     def __init__(self, pt_path: Path, ckpt: Dict, meta: Dict):
-        from implementations import HMTImageClassifier
+        from core.implementations import HMTImageClassifier
 
         arch        = ckpt.get("model_arch", {})
         class_names = ckpt.get("class_names",
@@ -689,19 +746,3 @@ def start_chat(model_name: Optional[str] = None):
         session = ClassifierSession(pt_path, ckpt, meta)
 
     session.run()
-
-
-import os  # needed for ANSI enable
-
-
-from typing import Dict
-
-def _detect_task(ckpt: Dict, meta: Dict) -> str:
-    if "model_config" in ckpt or "char2idx" in ckpt:
-        return "language_model"
-    elif meta.get("model_type", "").lower() in ("hmtclassifier", "hierarchical mamba"):
-        return "classifier"
-    elif meta.get("model_type", "").lower() in ("hmtimageclassifier", "image classification"):
-        return "image_classification"
-    else:
-        return "classifier"

@@ -229,13 +229,3 @@ def build_loaders(file_paths: List[str],
         "val_batches":   len(val_loader),
     }
     return train_loader, val_loader, info
-
-
-def build_csv_loaders(file_paths, batch_size, val_split, num_workers):
-    loaders = []
-    for file_path in file_paths:
-        with open(file_path, 'r') as f:
-            dataset = CSVDataset(f)
-            loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, num_workers=num_workers)
-            loaders.append(loader)
-    return loaders

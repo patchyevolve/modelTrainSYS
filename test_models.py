@@ -7,7 +7,7 @@ import torch.nn as nn
 
 def test_mamba():
     print("\n=== Testing MambaBlock ===")
-    from implementations import MambaBlock
+    from core.implementations import MambaBlock
     
     batch, seq, dim = 4, 32, 64
     x = torch.randn(batch, seq, dim, requires_grad=True)
@@ -27,7 +27,7 @@ def test_mamba():
 
 def test_transformer():
     print("\n=== Testing TransformerBlock ===")
-    from implementations import TransformerBlock
+    from core.implementations import TransformerBlock
     
     batch, seq, dim = 4, 32, 64
     x = torch.randn(batch, seq, dim, requires_grad=True)
@@ -47,7 +47,7 @@ def test_transformer():
 
 def test_hmt():
     print("\n=== Testing HierarchicalMambaTransformer ===")
-    from implementations import HierarchicalMambaTransformer
+    from core.implementations import HierarchicalMambaTransformer
     
     batch, seq, dim = 4, 32, 128
     x = torch.randn(batch, seq, dim, requires_grad=True)
@@ -68,8 +68,8 @@ def test_hmt():
     return True
 
 def test_classifier():
-    print("\n=== Testing HMTClassifier ===")
-    from implementations import HMTClassifier
+    print("\n=== Testing HMTClassifier (binary) ===")
+    from core.implementations import HMTClassifier
     
     batch, feat_dim = 8, 16
     x = torch.randn(batch, feat_dim, requires_grad=True)
@@ -90,9 +90,32 @@ def test_classifier():
     print(f"  Forward OK, backward OK (loss={loss.item():.4f})")
     return True
 
+def test_classifier_multiclass():
+    print("\n=== Testing HMTClassifier (multi-class) ===")
+    from core.implementations import HMTClassifier
+    
+    batch, feat_dim, n_classes = 8, 16, 5
+    x = torch.randn(batch, feat_dim, requires_grad=True)
+    
+    model = HMTClassifier(
+        input_dim=feat_dim, num_classes=n_classes,
+        dim=64, num_layers=2, num_heads=4, num_scales=2
+    )
+    model.train()
+    
+    out = model(x)
+    
+    print(f"  Input:  {x.shape} -> Output: {out.shape}")
+    assert out.shape == (batch, n_classes), f"Expected ({batch}, {n_classes}), got {out.shape}"
+    
+    loss = out.mean()
+    loss.backward()
+    print(f"  Forward OK, backward OK (loss={loss.item():.4f})")
+    return True
+
 def test_language_model():
     print("\n=== Testing HMTLanguageModel ===")
-    from implementations import HMTLanguageModel
+    from core.implementations import HMTLanguageModel
     
     batch, seq, vocab = 4, 32, 256
     x = torch.randint(0, vocab, (batch, seq))
@@ -141,10 +164,16 @@ def main():
         results.append(("HierarchicalMambaTransformer", False))
     
     try:
-        results.append(("HMTClassifier", test_classifier()))
+        results.append(("HMTClassifier (binary)", test_classifier()))
     except Exception as e:
         print(f"  FAILED: {e}")
-        results.append(("HMTClassifier", False))
+        results.append(("HMTClassifier (binary)", False))
+    
+    try:
+        results.append(("HMTClassifier (multi)", test_classifier_multiclass()))
+    except Exception as e:
+        print(f"  FAILED: {e}")
+        results.append(("HMTClassifier (multi)", False))
     
     try:
         results.append(("HMTLanguageModel", test_language_model()))
