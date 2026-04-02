@@ -199,20 +199,35 @@ python setup.py build_ext --inplace
 ```
 mlsystem/
 ├── core/
+│   ├── __init__.py
 │   ├── architecture.py        # Base classes and orchestrator
-│   ├── implementations.py      # Feeders, encoder, decoder
-│   ├── reflector_trainer.py   # Reflector and trainer
-│   └── auto_upgrade.py        # Auto-upgrade system
-├── cybersec/
-│   └── trainer.py             # Cybersecurity training
-├── interface/
-│   └── chat.py                # Interactive chat
-├── examples/
-│   └── integration_examples.py # Usage examples
-└── cpp/
-    ├── mamba_kernel.cpp       # C++ Mamba implementation
-    ├── reflector_kernel.cpp   # Fast reflector
-    └── setup.py               # Build configuration
+│   ├── device_manager.py      # GPU/CPU device management
+│   ├── implementations.py     # Feeders, encoder, decoder
+│   └── text_model.py          # Text processing models
+├── data/
+│   ├── __init__.py
+│   ├── data_loader.py         # Data loading utilities
+│   ├── image_dataset.py       # Image dataset handler
+│   ├── text_dataset.py        # Text dataset handler
+│   └── prefetch_loader.py     # Async data prefetching
+├── training/
+│   ├── __init__.py
+│   ├── trainer.py             # Main training loop
+│   └── reflector_trainer.py   # Reflector-integrated training
+├── ui/
+│   ├── __init__.py
+│   ├── chat.py                # Interactive chat interface
+│   ├── model_chat.py          # Model chat with task detection
+│   ├── training_ui.py         # Training progress UI
+│   └── upgrade_window.py      # Auto-upgrade UI
+├── utils/
+│   ├── __init__.py
+│   ├── auto_upgrade.py        # Auto-upgrade system
+│   ├── data_classifier.py     # Data type classification
+│   ├── inference.py           # Inference engine
+│   ├── project_context.py     # Project context analysis
+│   └── smart_upgrade.py       # Smart upgrade with context awareness
+└── inference_results/          # Output predictions and logs
 ```
 
 ---
@@ -777,6 +792,6 @@ For more information, see the examples and inline documentation.
 
 ---
 
-**Last Updated**: 2024
-**Version**: 1.0
+**Last Updated**: April 2026
+**Version**: 1.1
 **License**: MIT
