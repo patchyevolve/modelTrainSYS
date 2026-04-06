@@ -15,11 +15,13 @@ from typing import Tuple
 
 def get_best_device(model_params: int = 0,
                     batch_size: int = 32,
-                    force: str = "auto") -> Tuple[object, str]:
+                    force: str = "cpu") -> Tuple[object, str]:
     """
     Returns (device, device_name_str).
 
     force: "auto" | "cpu" | "cuda" | "dml"
+    
+    Note: Default is CPU for stability. Use force="cuda" or force="dml" for GPU.
     """
     if force == "cpu":
         return _cpu_device()
@@ -27,29 +29,23 @@ def get_best_device(model_params: int = 0,
     # CUDA (NVIDIA)
     if force == "cuda" or (force == "auto" and torch.cuda.is_available()):
         if torch.cuda.is_available():
-            name = torch.cuda.get_device_name(0)
-            return torch.device("cuda:0"), f"CUDA — {name}"
+            try:
+                name = torch.cuda.get_device_name(0)
+                return torch.device("cuda:0"), f"CUDA — {name}"
+            except:
+                pass
 
-    # DirectML (AMD/Intel iGPU on Windows)
-    if force == "dml" or force == "auto":
+    # DirectML (AMD/Intel iGPU on Windows) - Disabled by default due to stability issues
+    # Use force="dml" to enable
+    if force == "dml":
         try:
             import torch_directml
             dml = torch_directml.device()
-            # Only use DML if model is large enough to benefit
-            # iGPU wins when compute >> transfer overhead
-            DML_MIN_PARAMS  = 5_000_000   # 5M params
-            DML_MIN_BATCH   = 64
-            if (force == "dml" or
-                    (model_params >= DML_MIN_PARAMS and
-                     batch_size   >= DML_MIN_BATCH)):
-                return dml, "DirectML — AMD Radeon 680M"
-            else:
-                return _cpu_device(
-                    note=f"iGPU available but CPU faster for this model size "
-                         f"({model_params:,} params, batch={batch_size}). "
-                         f"Use --device dml to force GPU.")
+            return dml, "DirectML — AMD Radeon 680M"
         except ImportError:
             pass
+        except Exception as e:
+            print(f"DirectML init failed: {e}, falling back to CPU")
 
     return _cpu_device()
 
