@@ -85,6 +85,19 @@ MODEL_REGISTRY = {
         "input_dim_auto": False,
         "task": "hf_dataset",
     },
+    "Reasoning Training": {
+        "desc": (
+            "Advanced reasoning-aware training system.\n"
+            "Features:\n"
+            "- Multi-task learning (language + reasoning)\n"
+            "- Reasoning token boosting (because, therefore, etc.)\n"
+            "- Curriculum learning (simple → complex)\n"
+            "- Logical coherence regularization\n"
+            "Train on: text, Q&A pairs, reasoning chains, CSV."
+        ),
+        "input_dim_auto": False,
+        "task": "reasoning",
+    },
 }
 
 # ─── Color Palette ────────────────────────────────────────────────────────────
@@ -489,6 +502,58 @@ class TrainingPanel(tk.Frame):
         tk.Label(ds_row, text=" (e.g. wikitext, ianncity/...)", fg=TEXT_SEC,
                  bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
 
+        # Reasoning Training Settings
+        tk.Label(cfg_frame, text="── Reasoning Settings ──", fg=ACCENT2, bg=BG_CARD,
+                 font=("Segoe UI", 8, "bold")).pack(fill="x", padx=8, pady=(8, 4))
+        
+        # Reasoning Weight
+        reason_weight_row = tk.Frame(cfg_frame, bg=BG_CARD)
+        reason_weight_row.pack(fill="x", padx=8, pady=(1, 4))
+        tk.Label(reason_weight_row, text="Reasoning Weight", fg=TEXT_SEC, bg=BG_CARD,
+                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
+        self.reasoning_weight_var = tk.StringVar(value="3.0")
+        tk.Entry(reason_weight_row, textvariable=self.reasoning_weight_var, bg=BG_INPUT, fg=TEXT_PRI,
+                 insertbackground=TEXT_PRI, relief="flat",
+                 font=("Segoe UI", 9), width=6).pack(side="left", padx=4)
+        tk.Label(reason_weight_row, text=" (boost logic tokens)", fg=TEXT_SEC,
+                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
+        
+        # Logic Weight
+        logic_weight_row = tk.Frame(cfg_frame, bg=BG_CARD)
+        logic_weight_row.pack(fill="x", padx=8, pady=(1, 4))
+        tk.Label(logic_weight_row, text="Logic Weight", fg=TEXT_SEC, bg=BG_CARD,
+                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
+        self.logic_weight_var = tk.StringVar(value="2.5")
+        tk.Entry(logic_weight_row, textvariable=self.logic_weight_var, bg=BG_INPUT, fg=TEXT_PRI,
+                 insertbackground=TEXT_PRI, relief="flat",
+                 font=("Segoe UI", 9), width=6).pack(side="left", padx=4)
+        tk.Label(logic_weight_row, text=" (because, therefore...)", fg=TEXT_SEC,
+                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
+        
+        # Curriculum Learning toggle
+        curriculum_row = tk.Frame(cfg_frame, bg=BG_CARD)
+        curriculum_row.pack(fill="x", padx=8, pady=(1, 4))
+        tk.Label(curriculum_row, text="Curriculum", fg=TEXT_SEC, bg=BG_CARD,
+                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
+        self.curriculum_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(curriculum_row, variable=self.curriculum_var, bg=BG_CARD,
+                       fg=TEXT_PRI, selectcolor=BG_INPUT,
+                       activebackground=BG_CARD).pack(side="left")
+        tk.Label(curriculum_row, text="(simple→complex)", fg=TEXT_SEC,
+                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
+        
+        # Focal Loss toggle
+        focal_row = tk.Frame(cfg_frame, bg=BG_CARD)
+        focal_row.pack(fill="x", padx=8, pady=(1, 4))
+        tk.Label(focal_row, text="Focal Loss", fg=TEXT_SEC, bg=BG_CARD,
+                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
+        self.focal_loss_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(focal_row, variable=self.focal_loss_var, bg=BG_CARD,
+                       fg=TEXT_PRI, selectcolor=BG_INPUT,
+                       activebackground=BG_CARD).pack(side="left")
+        tk.Label(focal_row, text="(hard example mining)", fg=TEXT_SEC,
+                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
+
         # Model description box
         self.model_desc_lbl = tk.Label(
             cfg_frame, text="", fg=TEXT_SEC, bg=BG_CARD,
@@ -649,6 +714,10 @@ class TrainingPanel(tk.Frame):
             "reflector":      self.reflector_var.get(),
             "reasoning_only": self.reasoning_var.get(),
             "dataset_name":   self.dataset_var.get().strip(),
+            "reasoning_weight": float(self.reasoning_weight_var.get()),
+            "logic_weight":   float(self.logic_weight_var.get()),
+            "curriculum":      self.curriculum_var.get(),
+            "focal_loss":     self.focal_loss_var.get(),
         }
 
     # ── Training simulation / real run ───────────────────────────────────────
@@ -657,8 +726,8 @@ class TrainingPanel(tk.Frame):
         cfg = self._get_config()
         task = MODEL_REGISTRY.get(cfg["model_type"], {}).get("task", "binary_classification")
         
-        # Allow dataset training without local files
-        if task != "hf_dataset" and not files:
+        # Allow dataset or reasoning training without local files
+        if task not in ("hf_dataset", "reasoning") and not files:
             messagebox.showwarning("No Data",
                 "Please add training files before starting.")
             return
@@ -695,6 +764,8 @@ class TrainingPanel(tk.Frame):
             self._run_image_training(cfg, files)
         elif task == "hf_dataset":
             self._run_hf_dataset_training(cfg, files)
+        elif task == "reasoning":
+            self._run_reasoning_training(cfg, files)
         else:
             self._run_classifier_training(cfg, files)
     def _run_lm_training(self, cfg, files):
@@ -1671,6 +1742,247 @@ class TrainingPanel(tk.Frame):
         self.prog_lbl.config(text=f"Epoch {epoch}/{epochs}  ({pct:.0f}%)")
         self.loss_chart.push(loss)
         self.acc_chart.push(acc)
+
+    def _run_reasoning_training(self, cfg, files):
+        """Advanced reasoning-aware training with multi-task learning."""
+        import torch
+        import torch.nn.functional as F
+        
+        try:
+            from training.reasoning_trainer import (
+                ReasoningTrainer,
+                TrainingConfig,
+                ReasoningDataset,
+                MultiFormatDataLoader,
+                ReasoningAwareLoss,
+                CurriculumScheduler,
+            )
+            from data.advanced_tokenizer import ReasoningTokenizer
+        except ImportError as e:
+            self._ui(self._log, f"Reasoning trainer not available: {e}", "err")
+            self._ui(self._log, "Falling back to standard language model training", "warn")
+            self._run_lm_training(cfg, files)
+            return
+        
+        epochs     = cfg["epochs"]
+        batch_size = cfg["batch_size"]
+        lr         = cfg["lr"]
+        start_t    = time.time()
+        seq_len    = cfg.get("seq_len", 256)
+        if seq_len == 0:
+            seq_len = 256
+        
+        # Reasoning settings
+        reasoning_weight = cfg.get("reasoning_weight", 3.0)
+        logic_weight     = cfg.get("logic_weight", 2.5)
+        use_curriculum   = cfg.get("curriculum", True)
+        use_focal        = cfg.get("focal_loss", False)
+        
+        self._ui(self._log, "=== Reasoning-Aware Training ===", "info")
+        self._ui(self._log, f"Reasoning weight: {reasoning_weight}", "info")
+        self._ui(self._log, f"Logic weight: {logic_weight}", "info")
+        self._ui(self._log, f"Curriculum learning: {use_curriculum}", "info")
+        self._ui(self._log, f"Focal loss: {use_focal}", "info")
+        
+        # ── 1. Load data from files ───────────────────────────────────────────
+        try:
+            self._ui(self._log, "Loading training data...", "info")
+            
+            # Load texts from files
+            texts = []
+            for f in files:
+                loader = MultiFormatDataLoader(None, seq_len)
+                try:
+                    loaded = loader.load_file(f)
+                    texts.extend(loaded)
+                    self._ui(self._log, f"Loaded {len(loaded)} texts from {Path(f).name}", "ok")
+                except Exception as e:
+                    self._ui(self._log, f"Error loading {f}: {e}", "err")
+            
+            if not texts:
+                self._ui(self._log, "No text data loaded. Using sample data.", "warn")
+                texts = [
+                    "The reason is that water boils at 100 degrees Celsius.",
+                    "If it rains, then the ground gets wet. It is raining.",
+                    "Therefore, the ground is wet.",
+                    "All humans are mortal. Socrates is human. Therefore, Socrates is mortal.",
+                    "Think step by step. First, identify the premise.",
+                ]
+            
+            self._ui(self._log, f"Total texts: {len(texts)}", "ok")
+            
+        except Exception as e:
+            self._ui(self._log, f"Data loading failed: {e}", "err")
+            self._finish_training()
+            return
+        
+        # ── 2. Create tokenizer and dataset ───────────────────────────────────
+        try:
+            self._ui(self._log, "Building reasoning tokenizer...", "info")
+            tokenizer = ReasoningTokenizer(vocab_size=8192)
+            tokenizer.build(texts)
+            self._ui(self._log, f"Tokenizer vocab: {tokenizer.vocab_size}", "ok")
+            
+            train_ds = ReasoningDataset(
+                texts, tokenizer, seq_len=seq_len,
+                reasoning_weight=reasoning_weight
+            )
+            
+            train_loader = torch.utils.data.DataLoader(
+                train_ds, batch_size=batch_size, shuffle=True, drop_last=True
+            )
+            
+        except Exception as e:
+            self._ui(self._log, f"Tokenizer/dataset creation failed: {e}", "err")
+            self._finish_training()
+            return
+        
+        # ── 3. Build model ──────────────────────────────────────────────────
+        try:
+            from core.implementations import HMTLanguageModel
+            hidden    = cfg["hidden_dim"]
+            num_heads = max(1, min(8, hidden // 64))
+            hidden    = (hidden // num_heads) * num_heads
+            n_layers  = cfg["num_layers"]
+            n_scales  = 3
+            
+            model = HMTLanguageModel(
+                vocab_size = tokenizer.vocab_size,
+                dim        = hidden,
+                num_layers = n_layers,
+                num_heads  = num_heads,
+                num_scales = n_scales,
+                max_seq    = seq_len,
+                dropout    = 0.1,
+            )
+            param_count = sum(p.numel() for p in model.parameters())
+            
+            from core.device_manager import get_best_device
+            device, device_name = get_best_device(param_count, batch_size)
+            model = model.to(device)
+            
+            self._ui(self._log, f"Model: {param_count:,} params | dim={hidden} | layers={n_layers}", "ok")
+            self._ui(self._log, f"Device: {device_name}", "info")
+            
+        except Exception as e:
+            self._ui(self._log, f"Model creation failed: {e}", "err")
+            self._finish_training()
+            return
+        
+        # ── 4. Setup optimizer and loss ─────────────────────────────────────
+        opt_name = cfg["optimizer"]
+        if opt_name == "AdamW":
+            optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+        elif opt_name == "SGD":
+            optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+        else:
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=lr, total_steps=epochs * len(train_loader),
+            pct_start=0.1
+        )
+        
+        loss_fn = ReasoningAwareLoss(
+            reasoning_weight=reasoning_weight,
+            logic_weight=logic_weight,
+            use_focal=use_focal,
+        )
+        
+        # Curriculum scheduler
+        curriculum = CurriculumScheduler(total_steps=epochs * len(train_loader)) if use_curriculum else None
+        
+        # ── 5. Training loop ────────────────────────────────────────────────
+        best_loss    = float("inf")
+        best_state   = None
+        n_batches    = len(train_loader)
+        total_steps  = epochs * n_batches
+        UI_INTERVAL  = 2.0
+        last_ui_t   = time.time()
+        
+        MAX_STEPS_PER_EPOCH = 2000
+        steps_per_epoch = min(n_batches, MAX_STEPS_PER_EPOCH)
+        
+        for epoch in range(1, epochs + 1):
+            if self._stop_flag.is_set():
+                self._ui(self._log, "Training stopped by user.", "warn")
+                break
+            
+            epoch_loss = 0.0
+            model.train()
+            step = 0
+            
+            for batch in train_loader:
+                if self._stop_flag.is_set():
+                    break
+                if step >= steps_per_epoch:
+                    break
+                
+                xb, yb, weights = batch
+                xb, yb, weights = xb.to(device), yb.to(device), weights.to(device)
+                
+                optimizer.zero_grad()
+                logits = model(xb)
+                
+                loss, metrics = loss_fn(logits, yb, weights)
+                
+                if torch.isnan(loss) or torch.isinf(loss):
+                    self._ui(self._log, "NaN/Inf loss, skipping batch", "warn")
+                    continue
+                
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                scheduler.step()
+                
+                epoch_loss += loss.item()
+                step += 1
+                
+                now = time.time()
+                if now - last_ui_t >= UI_INTERVAL or step == steps_per_epoch:
+                    last_ui_t = now
+                    avg_loss   = epoch_loss / step
+                    cur_lr     = optimizer.param_groups[0]["lr"]
+                    elapsed    = now - start_t
+                    done       = (epoch - 1) * steps_per_epoch + step
+                    eta_s      = int((elapsed / done) * (total_steps - done))
+                    eta_str    = f"{eta_s//60}m {eta_s%60}s"
+                    pct        = (done / total_steps) * 100
+                    
+                    stage_info = ""
+                    if curriculum:
+                        stage_info = f" | Stage: {curriculum.stages[curriculum.current_stage]['name']}"
+                    
+                    self._ui(self._update_stats, epoch, epochs, avg_loss,
+                             max(0.0, 1.0 - avg_loss / 5.0),
+                             cur_lr, eta_str, 0.0, pct)
+                    
+                    self._ui(self._log,
+                        f"Ep {epoch}/{epochs} step {step}/{steps_per_epoch} "
+                        f"loss={avg_loss:.4f}{stage_info}", "info")
+            
+            avg_loss = epoch_loss / max(step, 1)
+            if avg_loss < best_loss:
+                best_loss  = avg_loss
+                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            
+            self._ui(self._log,
+                f"── Epoch {epoch}/{epochs} │ Loss: {avg_loss:.4f} │ Best: {best_loss:.4f}", "ok")
+            
+            # Sample generation
+            sample = self._lm_sample(model, tokenizer, seq_len)
+            if sample:
+                self._ui(self._log, f"Sample › {sample[:120]}", "info")
+        
+        else:
+            self._ui(self._log, "Reasoning training complete!", "ok")
+            # Save checkpoint
+            self._ui(self._save_lm_checkpoint, cfg, model, best_state,
+                     tokenizer, {"vocab_size": tokenizer.vocab_size, "dim": hidden,
+                                "num_layers": n_layers, "num_heads": num_heads,
+                                "num_scales": n_scales, "max_seq": seq_len}, {})
+        
+        self._ui(self._finish_training)
 
     def _finish_training(self):
         self.running = False
