@@ -33,8 +33,6 @@ from core.implementations import (
 from core.mamba import (
     HierarchicalMambaBlock,
     SSMCore,
-    parallel_scan_log,
-    selective_scan,
     create_hierarchical_mamba_stack,
     hierarchical_mamba_forward,
     MAMBA_AVAILABLE as HIERARCHICAL_MAMBA_AVAILABLE,
