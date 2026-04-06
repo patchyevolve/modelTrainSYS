@@ -1,23 +1,7 @@
 """
 Concrete implementations — real Hierarchical Mamba + Transformer backbone.
 
-MambaBlock:
-  - Proper selective SSM with expand/contract projections (d_inner = expand*dim)
-  - Depthwise causal conv1d for local context mixing
-  - Parallel associative scan (vectorised, no Python loop over T)
-  - SiLU gating, LayerNorm, residual
-
-TransformerBlock:
-  - Multi-head causal self-attention with RoPE positional encoding
-  - KV-cache support for fast autoregressive generation
-  - SwiGLU feed-forward (2x wider, gated)
-
-HierarchicalMambaTransformer (HMT):
-  - Universal backbone for ALL modalities
-  - Alternates Mamba + Transformer blocks at each depth
-  - 3 parallel scales (fine / medium / coarse) fused by learned weights
-  - Works on: text, code, tabular, image patches, statistics, logic sequences
-  - Single forward() → (batch, seq, hidden) — attach any head on top
+Uses modular components from core.mamba and core.transformer.
 
 Modality-specific heads:
   - LMHead          : next-token prediction (text, code generation)
@@ -49,243 +33,37 @@ except ImportError:
         DataType, ModuleConfig, ComponentType
     )
 
+try:
+    from core.mamba import MambaBlock
+except ImportError:
+    from .mamba import MambaBlock
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# REAL MAMBA BLOCK  (selective SSM with parallel scan)
-# ═══════════════════════════════════════════════════════════════════════════════
+try:
+    from core.transformer import TransformerBlock, RotaryEmbedding
+except ImportError:
+    from .transformer import TransformerBlock, RotaryEmbedding
 
-class MambaBlock(nn.Module):
-    """
-    Fast gated state-space block — numerically stable, CPU-friendly.
 
-    Uses a GRU-style selective recurrence with vectorised parallel scan:
-      f_t = sigmoid(W_f * x_t)   — forget gate (how much state to keep)
-      i_t = tanh(W_i * x_t)      — input gate  (new content)
-      h_t = f_t * h_{t-1} + (1-f_t) * i_t
-
-    Parallel scan via log-space cumsum (no Python loop over T).
-    SiLU output gate + causal conv1d for local mixing + residual.
-
-    ~10x faster than full Mamba SSM on CPU, numerically stable at any seq_len.
-    """
-
-    def __init__(self, dim: int, d_state: int = 16, expand: int = 2,
-                 dt_rank: int = None, conv_size: int = 4, dropout: float = 0.0):
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 5000):
         super().__init__()
-        self.dim     = dim
-        self.d_inner = expand * dim
-        self.dropout = dropout
-
-        # Input projection: dim → 2*d_inner (x and gate z)
-        self.in_proj = nn.Linear(dim, 2 * self.d_inner, bias=False)
-
-        # Depthwise causal conv1d for local context
-        self.conv1d  = nn.Conv1d(
-            self.d_inner, self.d_inner,
-            kernel_size=conv_size, padding=conv_size - 1,
-            groups=self.d_inner, bias=True)
-
-        # Gated recurrence
-        self.W_f = nn.Linear(self.d_inner, self.d_inner, bias=True)
-        self.W_i = nn.Linear(self.d_inner, self.d_inner, bias=True)
-        self.W_o = nn.Linear(self.d_inner, dim, bias=False)
-
-        self.norm = nn.LayerNorm(dim)
-        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-        # Init: forget gate bias=1 (high retention at start)
-        nn.init.constant_(self.W_f.bias, 1.0)
-        nn.init.zeros_(self.W_i.bias)
-        nn.init.xavier_uniform_(self.in_proj.weight)
-        nn.init.xavier_uniform_(self.W_o.weight)
+        pe  = torch.zeros(max_len, d_model)
+        pos = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div = torch.exp(torch.arange(0, d_model, 2).float()
+                        * -(math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        self.register_buffer("pe", pe.unsqueeze(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, T, dim) → (B, T, dim)"""
-        B, T, _ = x.shape
-        residual = x
-
-        # 1. Project + split into content and output gate
-        xz       = self.in_proj(x)
-        x_in, z  = xz.chunk(2, dim=-1)                # each (B, T, d_inner)
-
-        # 2. Causal conv1d (local mixing) - removes temporal dependency issues
-        xc = self.conv1d(x_in.transpose(1, 2))[:, :, :T]
-        xc = F.silu(xc).transpose(1, 2)               # (B, T, d_inner)
-
-        # 3. Simple FFN instead of unstable recurrence
-        # This works as a "mixing" layer - simpler and more stable
-        h = xc  # Direct pass-through with conv1d mixing
-
-        # 4. SiLU output gate + project back + residual + dropout
-        out = self.W_o(h * F.silu(z))                 # (B, T, dim)
-        return self.norm(self.drop(out) + residual)
+        return x + self.pe[:, :x.size(1)]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# REAL TRANSFORMER BLOCK  (causal, RoPE, SwiGLU, KV-cache)
+# REAL MAMBA BLOCK - Re-exported from core.mamba
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class RotaryEmbedding(nn.Module):
-    """Rotary Position Embedding (RoPE) — relative, extrapolates to longer seqs."""
-
-    def __init__(self, dim: int, max_len: int = 8192):
-        super().__init__()
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer("inv_freq", inv_freq)
-        self._build_cache(max_len)
-
-    def _build_cache(self, seq_len: int):
-        t     = torch.arange(seq_len, device=self.inv_freq.device).float()
-        freqs = torch.outer(t, self.inv_freq)          # (T, dim/2)
-        emb   = torch.cat([freqs, freqs], dim=-1)      # (T, dim)
-        
-        cos = emb.cos()[None, None]  # (1,1,T,dim)
-        sin = emb.sin()[None, None]
-        
-        if hasattr(self, "cos_cache"):
-            self.cos_cache = cos
-            self.sin_cache = sin
-        else:
-            self.register_buffer("cos_cache", cos)
-            self.register_buffer("sin_cache", sin)
-
-    @staticmethod
-    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-        x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
-        return torch.cat([-x2, x1], dim=-1)
-
-    def forward(self, q: torch.Tensor, k: torch.Tensor,
-                offset: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
-        T = q.shape[2]
-        # Expand cache if needed
-        if offset + T > self.cos_cache.shape[2]:
-            self._build_cache(offset + T + 1024)  # Add buffer for more generation
-
-        cos = self.cos_cache[:, :, offset: offset + T]
-        sin = self.sin_cache[:, :, offset: offset + T]
-        
-        # Ensure T matches cache slice (should now be true)
-        q   = q * cos + self._rotate_half(q) * sin
-        k   = k * cos + self._rotate_half(k) * sin
-        return q, k
-
-
-class TransformerBlock(nn.Module):
-    """
-    Causal Transformer block with:
-    - Multi-head self-attention + RoPE (with Flash Attention when available)
-    - KV-cache for O(1) per-step generation
-    - SwiGLU feed-forward (gate * up, then down)
-    - Pre-norm (LayerNorm before attention and FFN)
-    - Gradient checkpointing support for memory efficiency
-    """
-
-    def __init__(self, dim: int, num_heads: int = 8,
-                 ff_mult: int = 4, dropout: float = 0.1,
-                 max_len: int = 4096, use_flash_attn: bool = False):
-        super().__init__()
-        assert dim % num_heads == 0
-        self.dim       = dim
-        self.num_heads = num_heads
-        self.head_dim  = dim // num_heads
-        self.use_flash = use_flash_attn
-
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-
-        # QKV projection
-        self.qkv  = nn.Linear(dim, 3 * dim, bias=False)
-        self.out  = nn.Linear(dim, dim, bias=False)
-        self.drop = nn.Dropout(dropout)
-
-        # RoPE
-        self.rope = RotaryEmbedding(self.head_dim, max_len=max_len)
-
-        # SwiGLU FFN: two parallel projections, gated
-        ff_dim       = ff_mult * dim
-        self.ff_gate = nn.Linear(dim, ff_dim, bias=False)
-        self.ff_up   = nn.Linear(dim, ff_dim, bias=False)
-        self.ff_down = nn.Linear(ff_dim, dim, bias=False)
-
-        # KV cache (filled during generation)
-        self._kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-
-    def reset_cache(self):
-        self._kv_cache = None
-
-    def forward(self, x: torch.Tensor,
-                use_cache: bool = False,
-                cache_offset: int = 0) -> torch.Tensor:
-        """
-        x          : (B, T, dim)
-        use_cache  : True during autoregressive generation (T=1 per step)
-        returns    : (B, T, dim)
-        """
-        B, T, _ = x.shape
-
-        # ── Attention ──────────────────────────────────────────────────────
-        h = self.norm1(x)
-        qkv = self.qkv(h).reshape(B, T, 3, self.num_heads, self.head_dim)
-        q, k, v = qkv.unbind(2)                        # each (B,T,H,head_dim)
-        q = q.transpose(1, 2)                          # (B,H,T,head_dim)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        # Apply RoPE
-        q, k = self.rope(q, k, offset=cache_offset)
-
-        # Safety check: if RoPE truncated q/k (should not happen with dynamic cache), truncate v too
-        if q.shape[2] < T:
-            v = v[:, :, :q.shape[2]]
-
-        # KV cache
-        if use_cache:
-            if self._kv_cache is not None:
-                k_prev, v_prev = self._kv_cache
-                k = torch.cat([k_prev, k], dim=2)
-                v = torch.cat([v_prev, v], dim=2)
-            self._kv_cache = (k.detach(), v.detach())
-
-        # Use Flash Attention when available (PyTorch >= 2.0)
-        if self.use_flash and hasattr(F, 'scaled_dot_product_attention'):
-            # scaled_dot_product_attention is PyTorch's optimized attention
-            # equivalent to Flash Attention / Memory-Efficient Attention
-            attn_mask = None
-            if not use_cache and T > 1:
-                attn_mask = torch.triu(
-                    torch.ones(T, k.shape[2], device=x.device, dtype=torch.bool),
-                    diagonal=1)
-            
-            attn_out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=True
-            )
-            out = attn_out.transpose(1, 2).reshape(B, T, self.dim)
-        else:
-            # Standard attention fallback
-            scale = self.head_dim ** -0.5
-            attn  = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B,H,T,S)
-
-            # Causal mask (only during training / full-sequence forward)
-            if not use_cache and T > 1:
-                mask = torch.triu(
-                    torch.ones(T, k.shape[2], device=x.device) * -1e9,
-                    diagonal=1)
-                attn = attn + mask.unsqueeze(0).unsqueeze(0)
-
-            attn = F.softmax(attn, dim=-1)
-            attn = self.drop(attn)
-
-            out = torch.matmul(attn, v)                    # (B,H,T,head_dim)
-            out = out.transpose(1, 2).reshape(B, T, self.dim)
-
-        x   = x + self.out(out)
-
-        # ── SwiGLU FFN ─────────────────────────────────────────────────────
-        h   = self.norm2(x)
-        ffn = F.silu(self.ff_gate(h)) * self.ff_up(h)
-        x   = x + self.ff_down(ffn)
-
-        return x
+# MambaBlock is now imported from core.mamba
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -740,20 +518,7 @@ class TransformerDecoder(Decoder):
 # POSITIONAL ENCODING  (sinusoidal, backward-compatible)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, max_len: int = 5000):
-        super().__init__()
-        pe  = torch.zeros(max_len, d_model)
-        pos = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div = torch.exp(torch.arange(0, d_model, 2).float()
-                        * -(math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(pos * div)
-        pe[:, 1::2] = torch.cos(pos * div)
-        self.register_buffer("pe", pe.unsqueeze(0))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.pe[:, :x.size(1)]
-
+# PositionalEncoding is now defined at the top of the file after imports
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATA FEEDERS  (unchanged API)

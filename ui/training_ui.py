@@ -75,6 +75,16 @@ MODEL_REGISTRY = {
         "input_dim_auto": False,
         "task": "language_model",
     },
+    "Dataset Training": {
+        "desc": (
+            "Train on HuggingFace datasets — just enter dataset name.\n"
+            "Examples: ianncity/General-Distillation-Prompts-1M, wikitext,\n"
+            "openwebtext, c4, sst2, imdb, yelp_polarity, ag_news\n"
+            "Output: generated text (language model) or labels (classifier)."
+        ),
+        "input_dim_auto": False,
+        "task": "hf_dataset",
+    },
 }
 
 # ─── Color Palette ────────────────────────────────────────────────────────────
@@ -460,11 +470,23 @@ class TrainingPanel(tk.Frame):
         seq_row.pack(fill="x", padx=8, pady=(1, 4))
         tk.Label(seq_row, text="Seq Length", fg=TEXT_SEC, bg=BG_CARD,
                  font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
-        self.seq_len_var = tk.StringVar(value="128")  # 128 = good default for text gen
+        self.seq_len_var = tk.StringVar(value="128")
         tk.Entry(seq_row, textvariable=self.seq_len_var, bg=BG_INPUT, fg=TEXT_PRI,
                  insertbackground=TEXT_PRI, relief="flat",
                  font=("Segoe UI", 9), width=6).pack(side="left", padx=4)
         tk.Label(seq_row, text=" chars context (0=auto)", fg=TEXT_SEC,
+                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
+
+        # Dataset Name (for HuggingFace datasets)
+        ds_row = tk.Frame(cfg_frame, bg=BG_CARD)
+        ds_row.pack(fill="x", padx=8, pady=(1, 4))
+        tk.Label(ds_row, text="Dataset Name", fg=TEXT_SEC, bg=BG_CARD,
+                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
+        self.dataset_var = tk.StringVar(value="")
+        tk.Entry(ds_row, textvariable=self.dataset_var, bg=BG_INPUT, fg=TEXT_PRI,
+                 insertbackground=TEXT_PRI, relief="flat",
+                 font=("Segoe UI", 9), width=28).pack(side="left", padx=4)
+        tk.Label(ds_row, text=" (e.g. wikitext, ianncity/...)", fg=TEXT_SEC,
                  bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
 
         # Model description box
@@ -626,12 +648,17 @@ class TrainingPanel(tk.Frame):
             "seq_len":        seq_len_val if seq_len_val > 0 else 0,
             "reflector":      self.reflector_var.get(),
             "reasoning_only": self.reasoning_var.get(),
+            "dataset_name":   self.dataset_var.get().strip(),
         }
 
     # ── Training simulation / real run ───────────────────────────────────────
     def _start(self):
         files = self.get_files()
-        if not files:
+        cfg = self._get_config()
+        task = MODEL_REGISTRY.get(cfg["model_type"], {}).get("task", "binary_classification")
+        
+        # Allow dataset training without local files
+        if task != "hf_dataset" and not files:
             messagebox.showwarning("No Data",
                 "Please add training files before starting.")
             return
@@ -666,6 +693,8 @@ class TrainingPanel(tk.Frame):
             self._run_lm_training(cfg, files)
         elif task == "image_classification":
             self._run_image_training(cfg, files)
+        elif task == "hf_dataset":
+            self._run_hf_dataset_training(cfg, files)
         else:
             self._run_classifier_training(cfg, files)
     def _run_lm_training(self, cfg, files):
@@ -1399,6 +1428,208 @@ class TrainingPanel(tk.Frame):
 
         self._ui(self._finish_training)
 
+    def _run_hf_dataset_training(self, cfg, files):
+        """Training on HuggingFace datasets."""
+        import torch
+        import torch.optim as optim
+
+        epochs     = cfg["epochs"]
+        batch_size = cfg["batch_size"]
+        lr         = cfg["lr"]
+        start_t    = time.time()
+        dataset_name = cfg.get("dataset_name", "").strip()
+
+        if not dataset_name:
+            self._ui(self._log, "Please enter a dataset name (e.g., wikitext, ianncity/General-Distillation-Prompts-1M)", "err")
+            self._ui(self._finish_training)
+            return
+
+        # ── 1. Load dataset from HuggingFace ───────────────────────────────────
+        try:
+            from data.hf_dataset_loader import build_hf_loaders, DATASETS_AVAILABLE
+            
+            if not DATASETS_AVAILABLE:
+                self._ui(self._log, "datasets library not installed. Run: pip install datasets", "err")
+                self._ui(self._finish_training)
+                return
+
+            self._ui(self._log, f"Loading HuggingFace dataset: {dataset_name}...", "info")
+
+            user_seq_len = cfg.get("seq_len", 0)
+            seq_len = user_seq_len if user_seq_len > 0 else 128
+
+            train_loader, val_loader, tokenizer, info = build_hf_loaders(
+                dataset_name,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                val_split=0.1,
+            )
+
+            from data.prefetch_loader import PrefetchLoader
+            train_loader = PrefetchLoader(train_loader, buffer_size=3)
+
+            self._ui(self._log,
+                f"Dataset: {dataset_name} | "
+                f"{info['corpus_chars']:,} chars | "
+                f"vocab={info['vocab_size']} | "
+                f"{info['train_batches']} batches/epoch", "ok")
+
+        except ImportError as e:
+            self._ui(self._log, f"datasets library required: {e}", "err")
+            self._ui(self._log, "Install with: pip install datasets", "info")
+            self._ui(self._finish_training)
+            return
+        except Exception as e:
+            self._ui(self._log, f"Dataset loading failed: {e}", "err")
+            self._ui(self._finish_training)
+            return
+
+        # ── 2. Build language model ───────────────────────────────────────────
+        from core.text_model import lm_train_step, lm_val_loss, save_lm
+        from core.implementations import HMTLanguageModel
+        hidden    = cfg["hidden_dim"]
+        num_heads = max(1, min(8, hidden // 64))
+        hidden    = (hidden // num_heads) * num_heads
+        n_layers  = cfg["num_layers"]
+        n_scales  = 3
+
+        model = HMTLanguageModel(
+            vocab_size = info["vocab_size"],
+            dim        = hidden,
+            num_layers = n_layers,
+            num_heads  = num_heads,
+            num_scales = n_scales,
+            max_seq    = seq_len,
+            dropout    = 0.1,
+        )
+        param_count = model.count_parameters()
+
+        # ── Device selection ──────────────────────────────────────────────────
+        from core.device_manager import get_best_device, move_batch
+        device, device_name = get_best_device(
+            model_params=param_count, batch_size=batch_size)
+        model = model.to(device)
+        self._ui(self._log,
+            f"HMT-LM: {param_count:,} params | "
+            f"vocab={info['vocab_size']} | "
+            f"dim={hidden} | layers={n_layers}", "ok")
+        self._ui(self._log, f"Device: {device_name}", "info")
+
+        # ── 3. Optimizer ─────────────────────────────────────────────────────
+        opt_name = cfg["optimizer"]
+        if opt_name == "AdamW":
+            optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+        elif opt_name == "SGD":
+            optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+        else:
+            optimizer = optim.Adam(model.parameters(), lr=lr)
+
+        sched_name = cfg["scheduler"]
+        if sched_name == "CosineAnnealing":
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+        elif sched_name == "StepLR":
+            scheduler = optim.lr_scheduler.StepLR(
+                optimizer, step_size=max(1, epochs // 3), gamma=0.5)
+        else:
+            scheduler = None
+
+        # ── 4. Training loop ──────────────────────────────────────────────────
+        best_val    = float("inf")
+        best_state  = None
+        n_batches   = info["train_batches"]
+        total_steps = epochs * n_batches
+        UI_INTERVAL = 2.0
+        last_ui_t  = time.time()
+
+        MAX_STEPS_PER_EPOCH = 2000
+        steps_per_epoch = min(n_batches, MAX_STEPS_PER_EPOCH)
+        if steps_per_epoch < n_batches:
+            total_steps = epochs * steps_per_epoch
+            self._ui(self._log,
+                f"Capping at {steps_per_epoch:,} steps/epoch "
+                f"(full epoch = {n_batches:,} batches).", "warn")
+
+        for epoch in range(1, epochs + 1):
+            if self._stop_flag.is_set():
+                self._ui(self._log, "Training stopped by user.", "warn")
+                break
+
+            epoch_loss = 0.0
+            model.train()
+            step = 0
+
+            for xb, yb in train_loader:
+                if self._stop_flag.is_set():
+                    break
+                if step >= steps_per_epoch:
+                    break
+
+                xb, yb = move_batch((xb, yb), device)
+                loss_val = lm_train_step(model, optimizer, xb, yb,
+                                        reasoning_weight=1.0, tokenizer=tokenizer)
+                epoch_loss += loss_val
+                step += 1
+
+                now = time.time()
+                if now - last_ui_t >= UI_INTERVAL or step == steps_per_epoch:
+                    last_ui_t  = now
+                    avg        = epoch_loss / step
+                    ppl        = min(math.exp(avg), 9999.0)
+                    cur_lr     = optimizer.param_groups[0]["lr"]
+                    elapsed    = now - start_t
+                    done       = (epoch - 1) * steps_per_epoch + step
+                    eta_s      = int((elapsed / done) * (total_steps - done))
+                    eta_str    = f"{eta_s//60}m {eta_s%60}s"
+                    pct        = (done / total_steps) * 100
+
+                    self._ui(self._update_stats,
+                             epoch, epochs, avg,
+                             max(0.0, 1.0 - avg / 5.0),
+                             cur_lr, eta_str, 0.0, pct)
+
+                    self._ui(self._log,
+                        f"Ep {epoch}/{epochs}  "
+                        f"step {step}/{steps_per_epoch}  "
+                        f"loss={avg:.4f}  ppl={ppl:.1f}", "info")
+
+            if scheduler:
+                scheduler.step()
+
+            avg_loss   = epoch_loss / max(step, 1)
+            perplexity = min(math.exp(avg_loss), 9999.0)
+
+            self._ui(self._log, "Running validation...", "info")
+            val_l = lm_val_loss(model, val_loader, device=device, max_batches=50)
+            val_p = min(math.exp(val_l), 9999.0)
+            if val_l < best_val:
+                best_val   = val_l
+                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+
+            self._ui(self._log,
+                f"── Epoch {epoch}/{epochs} │ "
+                f"loss={avg_loss:.4f}  val={val_l:.4f} │ "
+                f"ppl={perplexity:.1f}  val_ppl={val_p:.1f}", "ok")
+
+            sample = self._lm_sample(model, tokenizer, seq_len)
+            if sample:
+                self._ui(self._log, f"Sample › {sample[:120]}", "info")
+
+        else:
+            self._ui(self._log, "Dataset training complete.", "ok")
+            lm_cfg = {
+                "vocab_size":  info["vocab_size"],
+                "dim":         hidden,
+                "num_layers":  cfg["num_layers"],
+                "num_heads":   num_heads,
+                "num_scales":  3,
+                "max_seq":     seq_len,
+                "dropout":     0.1,
+            }
+            self._ui(self._save_lm_checkpoint, cfg, model, best_state,
+                     tokenizer, lm_cfg, info)
+
+        self._ui(self._finish_training)
+
     def _ui(self, fn, *args):
         """Thread-safe UI update helper with safety check."""
         try:
@@ -2004,25 +2235,50 @@ class InferenceWindow(tk.Toplevel):
 # ─── Codebase Health Check ────────────────────────────────────────────────────
 
 class HealthPanel(tk.Toplevel):
-    REQUIRED = [
-        ("architecture.py",       "Core architecture & base classes"),
-        ("implementations.py",    "Concrete feeders, encoder, decoder"),
-        ("reflector_trainer.py",  "Reflector + integrated trainer"),
-        ("auto_upgrade.py",       "Self-upgrade system"),
-        ("trainer.py",            "Cybersecurity trainer"),
-        ("chat.py",               "Chat interface"),
-        ("setup.py",              "Build config for C++ extensions"),
-        ("__init__.py",           "Package init & exports"),
+    REQUIRED_STRUCTURE = [
+        ("core/",                        "Core module directory"),
+        ("core/__init__.py",             "Core module exports"),
+        ("core/architecture.py",         "Base classes and orchestrator"),
+        ("core/implementations.py",      "Feeders, encoder, decoder"),
+        ("core/mamba.py",               "Mamba block implementation"),
+        ("core/transformer.py",          "Transformer block implementation"),
+        ("core/text_model.py",           "Language model utilities"),
+        ("core/device_manager.py",       "GPU/CPU device management"),
+        ("training/",                    "Training module directory"),
+        ("training/__init__.py",         "Training module exports"),
+        ("training/trainer.py",          "Cybersecurity trainer"),
+        ("training/reflector_trainer.py","Reflector + integrated trainer"),
+        ("data/",                        "Data module directory"),
+        ("data/__init__.py",             "Data module exports"),
+        ("data/data_loader.py",          "CSV/NPY data loading"),
+        ("data/text_dataset.py",         "Text dataset for LM training"),
+        ("data/image_dataset.py",        "Image dataset loading"),
+        ("data/prefetch_loader.py",      "Async data prefetching"),
+        ("ui/",                          "UI module directory"),
+        ("ui/__init__.py",               "UI module exports"),
+        ("ui/chat.py",                  "Chat interface"),
+        ("ui/training_ui.py",           "Training GUI"),
+        ("ui/upgrade_window.py",        "Auto-upgrade UI"),
+        ("utils/",                       "Utils module directory"),
+        ("utils/__init__.py",            "Utils module exports"),
+        ("utils/data_classifier.py",    "Universal data classifier"),
+        ("utils/inference.py",          "Inference engine"),
+        ("utils/project_context.py",    "Project context analysis"),
+        ("utils/smart_upgrade.py",      "Smart upgrade system"),
+        ("utils/auto_upgrade.py",       "Auto-upgrade system"),
+        ("README.md",                    "Documentation"),
+    ]
+    
+    OPTIONAL_FILES = [
         ("mamba_kernel.cpp",      "C++ Mamba kernel (optional)"),
-        ("README.md",             "Documentation"),
-        ("ARCHITECTURE.md",       "Architecture docs"),
+        ("reflector_kernel.cpp",   "C++ reflector kernel (optional)"),
     ]
 
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Codebase Health Check")
         self.configure(bg=BG_DARK)
-        self.geometry("640x520")
+        self.geometry("700x580")
         self.resizable(True, True)
         self._build()
         self._run_check()
@@ -2031,21 +2287,21 @@ class HealthPanel(tk.Toplevel):
         tk.Label(self, text="Codebase Health Check",
                  fg=TEXT_PRI, bg=BG_DARK,
                  font=("Segoe UI", 13, "bold")).pack(pady=(16, 4))
-        tk.Label(self, text="Verifying all required files are present",
+        tk.Label(self, text="Verifying modular folder structure",
                  fg=TEXT_SEC, bg=BG_DARK,
                  font=("Segoe UI", 9)).pack(pady=(0, 12))
 
         frame = styled_frame(self, bg=BG_CARD)
         frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
-        cols = ("File", "Description", "Status")
+        cols = ("Location", "Description", "Status")
         self.tree = ttk.Treeview(frame, columns=cols, show="headings")
         style = ttk.Style()
         style.configure("Health.Treeview", background=BG_CARD,
                         foreground=TEXT_PRI, fieldbackground=BG_CARD,
                         font=("Segoe UI", 9))
         self.tree.configure(style="Health.Treeview")
-        for col, w in zip(cols, [180, 280, 80]):
+        for col, w in zip(cols, [180, 320, 80]):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, anchor="w")
         sb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
@@ -2055,30 +2311,63 @@ class HealthPanel(tk.Toplevel):
         self.tree.tag_configure("ok",      foreground=TEXT_OK)
         self.tree.tag_configure("missing", foreground=TEXT_ERR)
         self.tree.tag_configure("opt",     foreground=TEXT_WARN)
+        self.tree.tag_configure("dir",     foreground=ACCENT2)
 
         self.summary_lbl = tk.Label(self, text="", fg=TEXT_PRI, bg=BG_DARK,
                                     font=("Segoe UI", 10, "bold"))
         self.summary_lbl.pack(pady=(0, 8))
         ghost_btn(self, "Close", self.destroy, width=10).pack(pady=(0, 12))
 
+    def _check_path(self, path: str) -> tuple:
+        """Check if path exists. Returns (exists, is_directory, is_optional)"""
+        p = Path(path)
+        is_dir = path.endswith("/")
+        is_opt = path in [f[0] for f in self.OPTIONAL_FILES]
+        
+        if is_dir:
+            exists = p.exists() and p.is_dir()
+        else:
+            exists = p.exists() and p.is_file()
+        
+        return exists, is_dir, is_opt
+
     def _run_check(self):
-        ok = missing = optional = 0
-        for fname, desc in self.REQUIRED:
-            exists = Path(fname).exists()
-            is_opt = fname.endswith(".cpp")
-            if exists:
+        ok = missing = optional = dirs_ok = 0
+        
+        for path, desc in self.REQUIRED_STRUCTURE:
+            exists, is_dir, is_opt = self._check_path(path)
+            
+            if is_dir:
+                tag = "dir"
+                if exists:
+                    status = "✓ Dir"
+                    dirs_ok += 1
+                else:
+                    status = "✗ Missing"
+                    missing += 1
+            elif exists:
                 status = "✓ Found"; tag = "ok"; ok += 1
             elif is_opt:
                 status = "⚠ Optional"; tag = "opt"; optional += 1
             else:
                 status = "✗ Missing"; tag = "missing"; missing += 1
-            self.tree.insert("", "end", values=(fname, desc, status), tags=(tag,))
+            
+            self.tree.insert("", "end", values=(path, desc, status), tags=(tag,))
+        
+        # Check optional files
+        for path, desc in self.OPTIONAL_FILES:
+            exists = Path(path).exists()
+            if exists:
+                status = "✓ Found"; tag = "ok"; ok += 1
+            else:
+                status = "⚠ Optional"; tag = "opt"; optional += 1
+            self.tree.insert("", "end", values=(path, desc, status), tags=(tag,))
 
         if missing == 0:
-            msg = f"✓ All required files present  ({ok} ok, {optional} optional)"
+            msg = f"✓ All required files/directories present  ({dirs_ok} dirs, {ok} files, {optional} optional)"
             color = TEXT_OK
         else:
-            msg = f"✗ {missing} file(s) missing  ({ok} ok, {optional} optional)"
+            msg = f"✗ {missing} item(s) missing  ({dirs_ok} dirs, {ok} files, {optional} optional)"
             color = TEXT_ERR
         self.summary_lbl.config(text=msg, fg=color)
 
@@ -2093,18 +2382,30 @@ class TrainingApp(tk.Tk):
         self.configure(bg=BG_DARK)
         self.geometry("1400x860")
         self.minsize(1100, 700)
+        self._closing = False
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         self._build_titlebar()
         self._build_body()
 
     def _on_closing(self):
         """Ensure all background threads stop before exiting."""
+        if self._closing:
+            return
+        self._closing = True
+        
         if hasattr(self, "train_panel") and self.train_panel.running:
-            self.train_panel._stop()
-            # Wait briefly for thread to acknowledge stop
-            self.after(200, self.destroy)
+            self.train_panel._stop_flag.set()
+            self.train_panel.running = False
+            self.after(500, self._force_destroy)
         else:
+            self._force_destroy()
+    
+    def _force_destroy(self):
+        """Force destroy the window."""
+        try:
             self.destroy()
+        except Exception:
+            pass
 
     def _build_titlebar(self):
         bar = tk.Frame(self, bg=BG_PANEL, height=48)

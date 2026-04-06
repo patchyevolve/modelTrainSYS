@@ -42,7 +42,17 @@ class TaskType(Enum):
     REGRESSION = "regression"
     LANGUAGE_MODEL = "language_model"
     IMAGE_CLASSIFICATION = "image_classification"
+    TEXT_GENERATION_CSV = "text_generation_csv"
     GENERATION = "generation"
+
+
+class TrainerType(Enum):
+    CLASSIFIER = "classifier"
+    LANGUAGE_MODEL = "language_model"
+    IMAGE_CLASSIFIER = "image_classifier"
+    CYBERSECURITY = "cybersecurity"
+    REGRESSION = "regression"
+    HUGGINGFACE_DATASET = "huggingface_dataset"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,13 +151,11 @@ class ContentAnalyzer:
         import pandas as pd
         
         try:
-            df = pd.read_csv(path, nrows=100)  # Sample first 100 rows
+            df = pd.read_csv(path, nrows=1000)
             
-            # Count columns by type
             num_cols = len(df.columns)
-            num_rows = len(df)  # Sample size
+            num_rows = len(df)
             
-            # Find potential label column
             label_col = None
             label_candidates = [
                 "label", "class", "target", "category", "y",
@@ -160,16 +168,75 @@ class ContentAnalyzer:
                     label_col = col
                     break
             
+            text_col = None
+            text_col_candidates = [
+                "text", "content", "body", "message", "sentence", 
+                "review", "description", "comment", "input", "output",
+                "prompt", "response", "article", "document"
+            ]
+            
+            for col in df.columns:
+                if col.lower() in text_col_candidates:
+                    text_col = col
+                    break
+            
+            text_cols = df.select_dtypes(include="object").columns.tolist()
+            
+            avg_text_len = 0
+            if text_cols:
+                sample_texts = df[text_cols[0]].dropna().astype(str)
+                if len(sample_texts) > 0:
+                    avg_text_len = sample_texts.str.len().mean()
+            
+            if text_col and avg_text_len > 100:
+                is_text_gen = True
+                for col in df.columns:
+                    if col != text_col and df[col].dtype in ['int64', 'float64']:
+                        if df[col].nunique() <= 10:
+                            is_text_gen = False
+                            break
+                
+                if is_text_gen:
+                    return {
+                        "num_samples": num_rows,
+                        "num_features": num_cols,
+                        "num_classes": None,
+                        "is_binary": False,
+                        "task_type": TaskType.TEXT_GENERATION_CSV,
+                        "label_column": text_col,
+                        "class_names": None,
+                        "is_text_generation": True,
+                    }
+            
+            if label_col is None and text_col is None:
+                if len(text_cols) >= num_cols * 0.7 and avg_text_len > 50:
+                    return {
+                        "num_samples": num_rows,
+                        "num_features": num_cols,
+                        "num_classes": None,
+                        "is_binary": False,
+                        "task_type": TaskType.TEXT_GENERATION_CSV,
+                        "label_column": None,
+                        "class_names": None,
+                        "is_text_generation": True,
+                    }
+                return {
+                    "num_samples": num_rows,
+                    "num_features": num_cols,
+                    "num_classes": 1,
+                    "is_binary": True,
+                    "task_type": TaskType.REGRESSION,
+                    "label_column": None,
+                    "class_names": None,
+                }
+            
             if label_col is None:
-                # Use last column as label
                 label_col = df.columns[-1]
             
-            # Analyze label column
             label_values = df[label_col].dropna().unique()
             num_classes = len(label_values)
             is_binary = num_classes <= 2
             
-            # Determine task type
             if num_classes == 2:
                 task = TaskType.BINARY_CLASSIFICATION
             elif num_classes > 2:
@@ -177,14 +244,9 @@ class ContentAnalyzer:
             else:
                 task = TaskType.REGRESSION
             
-            # Check for text content (if most columns are text)
-            text_cols = df.select_dtypes(include="object").columns.tolist()
-            if len(text_cols) > num_cols * 0.5:
-                task = TaskType.LANGUAGE_MODEL
-            
             return {
                 "num_samples": num_rows,
-                "num_features": num_cols - 1,  # Exclude label
+                "num_features": num_cols - 1,
                 "num_classes": num_classes,
                 "is_binary": is_binary,
                 "task_type": task,
@@ -537,6 +599,70 @@ class DataClassifier:
             for w in info.warnings:
                 lines.append(f"Warning: {w}")
         return "\n".join(lines)
+
+    def select_trainer(self, info: FileInfo) -> Tuple[TrainerType, str]:
+        """
+        Select the appropriate trainer based on file analysis.
+        
+        Returns: (TrainerType, recommended_model_config)
+        """
+        if info.data_type == DataType.IMAGE:
+            return TrainerType.IMAGE_CLASSIFIER, "Image Classification"
+        
+        if info.data_type == DataType.TEXT:
+            return TrainerType.LANGUAGE_MODEL, "Text Generation"
+        
+        if info.data_type == DataType.TABULAR:
+            if info.task_type == TaskType.REGRESSION:
+                return TrainerType.REGRESSION, "Regression"
+            
+            if info.task_type == TaskType.LANGUAGE_MODEL:
+                return TrainerType.LANGUAGE_MODEL, "Text Generation from CSV"
+            
+            if info.num_classes and info.num_classes > 1:
+                if info.is_binary:
+                    return TrainerType.CLASSIFIER, "Binary Classification"
+                else:
+                    return TrainerType.CLASSIFIER, "Multi-class Classification"
+        
+        return TrainerType.CLASSIFIER, "Default Classifier"
+
+    def analyze_and_recommend(self, path: Union[str, Path]) -> Dict[str, Any]:
+        """Analyze a file and provide training recommendations."""
+        info = self.classify_file(path)
+        trainer_type, trainer_name = self.select_trainer(info)
+        
+        recommendations = {
+            "file_info": info.to_dict(),
+            "recommended_trainer": trainer_type.value,
+            "trainer_description": trainer_name,
+            "ui_model_type": self._get_ui_model_type(trainer_type),
+            "suggestions": [],
+        }
+        
+        if info.num_samples and info.num_samples < 100:
+            recommendations["suggestions"].append(
+                f"Small dataset: only {info.num_samples} samples. Consider data augmentation."
+            )
+        
+        if info.num_features and info.num_features > 1000:
+            recommendations["suggestions"].append(
+                f"High dimensionality ({info.num_features} features). Consider dimensionality reduction."
+            )
+        
+        return recommendations
+
+    def _get_ui_model_type(self, trainer_type: TrainerType) -> str:
+        """Map trainer type to UI model type."""
+        mapping = {
+            TrainerType.CLASSIFIER: "Hierarchical Mamba",
+            TrainerType.LANGUAGE_MODEL: "Text Generation",
+            TrainerType.IMAGE_CLASSIFIER: "Image Classification",
+            TrainerType.CYBERSECURITY: "Cybersecurity",
+            TrainerType.REGRESSION: "Hierarchical Mamba",
+            TrainerType.HUGGINGFACE_DATASET: "Dataset Training",
+        }
+        return mapping.get(trainer_type, "Hierarchical Mamba")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
