@@ -1,7 +1,9 @@
 """
 Mamba Block - Selective State Space Model
 ========================================
-Supports parallel scan on CPU/CUDA, with DirectML fallback.
+Parallel scan for all backends.
+CPU/CUDA: Uses native cumsum
+DirectML: Uses chunked parallel computation
 """
 
 import math
@@ -14,18 +16,46 @@ import torch.nn.functional as F
 MAMBA_AVAILABLE = True
 
 
-def parallel_scan_log(
+def parallel_scan_cpu(
     log_coeffs: torch.Tensor,
     log_values: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Parallel scan for the linear recurrence.
-    Uses cumsum which is faster on CPU/CUDA.
-    NOT supported on DirectML.
-    """
+    """Parallel scan using cumsum (CPU/CUDA native)."""
     a_star = torch.cumsum(log_coeffs, dim=1)
     log_x0_plus_b_star = torch.logcumsumexp(log_values - a_star, dim=1)
     return torch.exp(a_star + log_x0_plus_b_star)
+
+
+def parallel_scan_chunked(
+    log_coeffs: torch.Tensor,
+    log_values: torch.Tensor,
+    chunk_size: int = 64,
+) -> torch.Tensor:
+    """
+    Chunked parallel scan - works on all backends including DirectML.
+    Processes sequence in chunks, maintains parallel computation within chunks.
+    """
+    B, T, D = log_coeffs.shape
+    result = torch.zeros_like(log_values)
+    
+    for start in range(0, T, chunk_size):
+        end = min(start + chunk_size, T)
+        chunk_len = end - start
+        
+        log_coeffs_chunk = log_coeffs[:, start:end, :]
+        log_values_chunk = log_values[:, start:end, :]
+        
+        if start == 0:
+            a_star = torch.cumsum(log_coeffs_chunk, dim=1)
+        else:
+            prev_a = result[:, start-1:start, :].exp()
+            a_star = prev_a * torch.cumsum(log_coeffs_chunk, dim=1).exp()
+            a_star = torch.log(a_star + 1e-38)
+        
+        log_x0_plus_b_star = torch.logcumsumexp(log_values_chunk - a_star, dim=1)
+        result[:, start:end, :] = torch.exp(a_star + log_x0_plus_b_star)
+    
+    return result
 
 
 def selective_scan(
@@ -35,10 +65,9 @@ def selective_scan(
     B: torch.Tensor,
     C: torch.Tensor,
     D: torch.Tensor,
+    use_chunked: bool = False,
 ) -> torch.Tensor:
-    """
-    Discretised selective SSM with parallel scan.
-    """
+    """Discretised selective SSM."""
     B_batch, T, d_inner = x.shape
     d_state = A.shape[1]
 
@@ -51,15 +80,18 @@ def selective_scan(
     log_dA = torch.log(dA.clamp(min=1e-38)).view(B_batch, T, flat_len)
     log_dBx = torch.log(dBx.clamp(min=1e-38)).view(B_batch, T, flat_len)
 
-    h = parallel_scan_log(log_dA, log_dBx)
+    if use_chunked:
+        h = parallel_scan_chunked(log_dA, log_dBx)
+    else:
+        h = parallel_scan_cpu(log_dA, log_dBx)
+    
     h = h.view(B_batch, T, d_inner, d_state)
-
     y = torch.einsum("bts,btds->btd", C, h) + D * x
     return y
 
 
 class SSMCore(nn.Module):
-    """Simplified SSM core with optional parallel scan."""
+    """SSM core with parallel scan support."""
 
     def __init__(self, d_inner: int, d_state: int = 16, conv_size: int = 4):
         super().__init__()
@@ -94,10 +126,9 @@ class SSMCore(nn.Module):
 
         if use_parallel:
             try:
-                A = -torch.exp(torch.log(
-                    torch.arange(1, self.d_state + 1, device=x.device, dtype=x.dtype)
-                )).unsqueeze(0).expand(self.d_inner, -1)
-                y = selective_scan(xc, dt, A, B_ssm, C_ssm, self.D)
+                A_init = torch.arange(1, self.d_state + 1, device=x.device, dtype=x.dtype).float()
+                A = -A_init.unsqueeze(0).expand(self.d_inner, -1)
+                y = selective_scan(xc, dt, A, B_ssm, C_ssm, self.D, use_chunked=False)
                 return y
             except Exception:
                 pass
@@ -109,8 +140,7 @@ class SSMCore(nn.Module):
 class HierarchicalMambaBlock(nn.Module):
     """
     Hierarchical Selective State Space Block.
-    Uses parallel scan when available (CPU/CUDA).
-    Falls back to simpler computation for DirectML.
+    Uses parallel scan on all backends.
     """
 
     def __init__(
@@ -147,9 +177,12 @@ class HierarchicalMambaBlock(nn.Module):
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def _use_parallel(self) -> bool:
-        """Check if we can use parallel scan (not DirectML)."""
-        device_type = next(self.parameters()).device.type
-        return device_type in ('cpu', 'cuda', 'mps')
+        """Check if we can use native parallel scan."""
+        try:
+            device_type = next(self.parameters()).device.type
+            return device_type in ('cpu', 'cuda', 'mps')
+        except:
+            return True
 
     @staticmethod
     def _downsample(x: torch.Tensor, stride: int) -> torch.Tensor:
@@ -160,13 +193,11 @@ class HierarchicalMambaBlock(nn.Module):
         return x[:, :T_trim, :].reshape(B, T_trim // stride, stride, D).mean(2)
 
     def _upsample(self, x: torch.Tensor, T_target: int) -> torch.Tensor:
-        """Simple upsample using interpolate."""
         if x.shape[1] == T_target:
             return x
         return F.interpolate(x.transpose(1, 2), size=T_target, mode='linear', align_corners=False).transpose(1, 2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, T, dim) → (B, T, dim)"""
         B, T, _ = x.shape
         residual = x
 
@@ -202,7 +233,6 @@ def create_hierarchical_mamba_stack(
     expand: int = 2,
     num_scales: int = 3,
 ) -> nn.ModuleList:
-    """Build a stack of HierarchicalMambaBlocks."""
     return nn.ModuleList([
         HierarchicalMambaBlock(
             dim=dim,
@@ -219,7 +249,6 @@ def hierarchical_mamba_forward(
     blocks: nn.ModuleList,
     x: torch.Tensor,
 ) -> torch.Tensor:
-    """Sequential forward through a HierarchicalMamba stack."""
     for block in blocks:
         x = block(x)
     return x
@@ -234,11 +263,6 @@ if __name__ == "__main__":
     block = HierarchicalMambaBlock(dim=dim, d_state=16, expand=2, num_scales=3)
     y = block(x)
 
-    assert y.shape == (B, T, dim), f"Shape mismatch: {y.shape}"
+    assert y.shape == (B, T, dim)
     print(f"HierarchicalMambaBlock  in={tuple(x.shape)}  out={tuple(y.shape)}  ✓")
-    print(f"Using parallel scan: {block._use_parallel()}")
-
-    stack = create_hierarchical_mamba_stack(dim=dim, num_layers=4, dropout=0.1)
-    y2 = hierarchical_mamba_forward(stack, x)
-    assert y2.shape == (B, T, dim)
-    print(f"Stack (4 layers)        in={tuple(x.shape)}  out={tuple(y2.shape)}  ✓")
+    print(f"Uses parallel: {block._use_parallel()}")

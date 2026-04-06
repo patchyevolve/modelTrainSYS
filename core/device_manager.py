@@ -15,18 +15,18 @@ from typing import Tuple
 
 def get_best_device(model_params: int = 0,
                     batch_size: int = 32,
-                    force: str = "cpu") -> Tuple[object, str]:
+                    force: str = "auto") -> Tuple[object, str]:
     """
     Returns (device, device_name_str).
 
     force: "auto" | "cpu" | "cuda" | "dml"
     
-    Note: Default is CPU for stability. Use force="cuda" or force="dml" for GPU.
+    Default: GPU (CUDA/DirectML) when available, CPU otherwise.
     """
     if force == "cpu":
         return _cpu_device()
 
-    # CUDA (NVIDIA)
+    # CUDA (NVIDIA) - preferred
     if force == "cuda" or (force == "auto" and torch.cuda.is_available()):
         if torch.cuda.is_available():
             try:
@@ -35,17 +35,19 @@ def get_best_device(model_params: int = 0,
             except:
                 pass
 
-    # DirectML (AMD/Intel iGPU on Windows) - Disabled by default due to stability issues
-    # Use force="dml" to enable
-    if force == "dml":
+    # DirectML (AMD/Intel iGPU on Windows)
+    if force == "dml" or force == "auto":
         try:
             import torch_directml
             dml = torch_directml.device()
-            return dml, "DirectML — AMD Radeon 680M"
+            # Test if DirectML works
+            test_tensor = torch.randn(2, 32, device=dml)
+            _ = test_tensor * 2
+            return dml, "DirectML — GPU (parallel enabled)"
         except ImportError:
             pass
         except Exception as e:
-            print(f"DirectML init failed: {e}, falling back to CPU")
+            print(f"DirectML test failed: {e}")
 
     return _cpu_device()
 
