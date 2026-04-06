@@ -369,6 +369,14 @@ class TrainingPanel(tk.Frame):
         self.log_lines = []
         self._build()
 
+    def _ui(self, fn, *args):
+        """Thread-safe UI update helper."""
+        try:
+            if self.winfo_exists():
+                self.after(0, fn, *args)
+        except Exception:
+            pass
+
     def _build(self):
         # ── Config section ──
         cfg_frame = styled_frame(self, bg=BG_CARD)
