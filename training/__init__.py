@@ -13,3 +13,10 @@ from training.reasoning_trainer import (
     CurriculumScheduler,
     MultiFormatDataLoader,
 )
+from training.unified_trainer import (
+    UnifiedTrainer,
+    TrainConfig,
+    TrainResult,
+    ModelType,
+    train_model,
+)
