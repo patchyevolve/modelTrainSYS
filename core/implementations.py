@@ -232,15 +232,7 @@ class HierarchicalMambaTransformer(nn.Module):
         x : (B, T, dim)  — already embedded input
         returns: (B, T, dim)
         """
-        # ── Multi-scale fusion ────────────────────────────────────────────
-        weights = F.softmax(self.scale_weights, dim=0)
-        fused   = torch.zeros_like(x)
-        for i, (proj_in, proj_out) in enumerate(
-                zip(self.scale_projs_in, self.scale_projs_out)):
-            fused = fused + weights[i] * proj_out(proj_in(x))
-        x = self.drop(fused)
-
-        # ── Alternating Mamba + Transformer layers ────────────────────────
+        # ── Hierarchical Mamba + Transformer layers ───────────────────────
         if self.use_gc and self.training:
             # Gradient checkpointing: recompute activations to save memory
             for mamba, attn in zip(self.mamba_blocks, self.attn_blocks):
