@@ -68,35 +68,13 @@ MODEL_REGISTRY = {
     "Text Generation": {
         "desc": (
             "Hierarchical Mamba Language Model — learns to generate text.\n"
-            "Train on: .txt, .jsonl, .json, .csv (text column) files.\n"
-            "After training: type a prompt → model continues writing.\n"
-            "Output: generated text (characters, not a number)."
+            "Train on: .txt, .csv, .json, .jsonl files OR HuggingFace datasets.\n"
+            "Enter dataset name (e.g., wikitext, ianncity/General-Distillation-Prompts-1M)\n"
+            "to train on online datasets. Enable reasoning for logical tasks.\n"
+            "After training: type a prompt → model continues writing."
         ),
         "input_dim_auto": False,
         "task": "language_model",
-    },
-    "Dataset Training": {
-        "desc": (
-            "Train on HuggingFace datasets — just enter dataset name.\n"
-            "Examples: ianncity/General-Distillation-Prompts-1M, wikitext,\n"
-            "openwebtext, c4, sst2, imdb, yelp_polarity, ag_news\n"
-            "Output: generated text (language model) or labels (classifier)."
-        ),
-        "input_dim_auto": False,
-        "task": "hf_dataset",
-    },
-    "Reasoning Training": {
-        "desc": (
-            "Advanced reasoning-aware training system.\n"
-            "Features:\n"
-            "- Multi-task learning (language + reasoning)\n"
-            "- Reasoning token boosting (because, therefore, etc.)\n"
-            "- Curriculum learning (simple → complex)\n"
-            "- Logical coherence regularization\n"
-            "Train on: text, Q&A pairs, reasoning chains, CSV."
-        ),
-        "input_dim_auto": False,
-        "task": "reasoning",
     },
 }
 
@@ -502,8 +480,8 @@ class TrainingPanel(tk.Frame):
         tk.Label(ds_row, text=" (e.g. wikitext, ianncity/...)", fg=TEXT_SEC,
                  bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
 
-        # Reasoning Training Settings
-        tk.Label(cfg_frame, text="── Reasoning Settings ──", fg=ACCENT2, bg=BG_CARD,
+        # Reasoning Settings (for Text Generation)
+        tk.Label(cfg_frame, text="── Text/Reasoning Settings ──", fg=ACCENT2, bg=BG_CARD,
                  font=("Segoe UI", 8, "bold")).pack(fill="x", padx=8, pady=(8, 4))
         
         # Reasoning Weight
@@ -527,7 +505,7 @@ class TrainingPanel(tk.Frame):
         tk.Entry(logic_weight_row, textvariable=self.logic_weight_var, bg=BG_INPUT, fg=TEXT_PRI,
                  insertbackground=TEXT_PRI, relief="flat",
                  font=("Segoe UI", 9), width=6).pack(side="left", padx=4)
-        tk.Label(logic_weight_row, text=" (because, therefore...)", fg=TEXT_SEC,
+        tk.Label(logic_weight_row, text=" (connectors)", fg=TEXT_SEC,
                  bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
         
         # Curriculum Learning toggle
@@ -762,14 +740,12 @@ class TrainingPanel(tk.Frame):
             self._run_lm_training(cfg, files)
         elif task == "image_classification":
             self._run_image_training(cfg, files)
-        elif task == "hf_dataset":
-            self._run_hf_dataset_training(cfg, files)
-        elif task == "reasoning":
-            self._run_reasoning_training(cfg, files)
         else:
             self._run_classifier_training(cfg, files)
     def _run_lm_training(self, cfg, files):
-        """Language model training — next-token prediction on text files."""
+        """Language model training — next-token prediction on text files.
+        Supports: local files (txt, csv, json) and HuggingFace datasets.
+        Optional: reasoning-aware training with token boosting."""
         import torch
         import torch.optim as optim
 
@@ -778,61 +754,82 @@ class TrainingPanel(tk.Frame):
         lr         = cfg["lr"]
         start_t    = time.time()
 
+        # Reasoning settings (apply to all text training)
+        reasoning_weight = cfg.get("reasoning_weight", 1.0)
+        use_reasoning   = reasoning_weight > 1.0
+        use_curriculum  = cfg.get("curriculum", False)
+        use_focal       = cfg.get("focal_loss", False)
+
+        # Check for HuggingFace dataset
+        dataset_name = cfg.get("dataset_name", "").strip()
+        
+        # Auto-size seq_len
+        user_seq_len = cfg.get("seq_len", 0)
+        seq_len = user_seq_len if user_seq_len > 0 else 128
+
         # ── 1. Load text data ─────────────────────────────────────────────────
         try:
-            from data.text_dataset import build_text_loaders, read_text_files
+            if dataset_name:
+                # HuggingFace dataset
+                self._ui(self._log, f"Loading HuggingFace dataset: {dataset_name}...", "info")
+                try:
+                    from data.hf_dataset_loader import build_hf_loaders
+                    train_loader, val_loader, tokenizer, info = build_hf_loaders(
+                        dataset_name, seq_len=seq_len, batch_size=batch_size, val_split=0.1
+                    )
+                    self._ui(self._log,
+                        f"Dataset: {dataset_name} | "
+                        f"vocab={info['vocab_size']} | "
+                        f"{info['train_batches']} batches/epoch", "ok")
+                except ImportError:
+                    self._ui(self._log, "datasets library not installed. Run: pip install datasets", "err")
+                    self._ui(self._finish_training)
+                    return
+                except Exception as e:
+                    self._ui(self._log, f"Dataset loading failed: {e}", "err")
+                    self._ui(self._finish_training)
+                    return
+                    
+            elif files:
+                # Local files (txt, csv, json, jsonl)
+                from data.text_dataset import build_text_loaders, read_text_files
+                
+                corpus_size = sum(
+                    Path(f).stat().st_size for f in files if Path(f).exists())
+                
+                if user_seq_len == 0:
+                    if corpus_size > 5_000_000:
+                        seq_len = 128
+                        batch_size = min(batch_size, 64)
+                    elif corpus_size > 1_000_000:
+                        seq_len = 96
+                        batch_size = min(batch_size, 48)
+                    elif corpus_size > 200_000:
+                        seq_len = 64
 
-            # Auto-size seq_len and batch_size for corpus size (can be overridden)
-            # User can set seq_len in config, otherwise auto-detect
-            user_seq_len = cfg.get("seq_len", 0)  # 0 means not set
-            
-            corpus_size = sum(
-                Path(f).stat().st_size for f in files if Path(f).exists())
-
-            if user_seq_len > 0:
-                # User specified seq_len - use it
-                seq_len = user_seq_len
-            elif corpus_size > 5_000_000:       # > 5 MB (like big.txt)
-                seq_len    = 128               # increased from 32 for better learning
-                batch_size = min(batch_size, 64)
+                self._ui(self._log, "Loading text corpus…", "info")
+                train_loader, val_loader, tokenizer, info = build_text_loaders(
+                    files, seq_len=seq_len, batch_size=batch_size)
+                
+                from data.prefetch_loader import PrefetchLoader
+                train_loader = PrefetchLoader(train_loader, buffer_size=3)
+                
                 self._ui(self._log,
-                    f"Large corpus ({corpus_size/1024/1024:.1f} MB) — "
-                    f"using seq_len={seq_len}, batch={batch_size}", "warn")
-            elif corpus_size > 1_000_000:     # > 1 MB
-                seq_len    = 96
-                batch_size = min(batch_size, 48)
-            elif corpus_size > 200_000:       # > 200 KB
-                seq_len    = 64
+                    f"Corpus: {info['corpus_chars']:,} chars | "
+                    f"vocab={info['vocab_size']} | seq_len={seq_len} | "
+                    f"{info['train_batches']} batches/epoch", "ok")
             else:
-                seq_len = min(cfg["hidden_dim"] // 2, 96)
+                self._ui(self._log, "No data provided. Provide files or dataset name.", "err")
+                self._ui(self._finish_training)
+                return
 
-            self._ui(self._log, "Loading text corpus…", "info")
+            n_batches = info["train_batches"] if isinstance(info, dict) else len(train_loader)
             
-            # Check for Reasoning Mode
-            reasoning_only = cfg.get("reasoning_only", False)
-            if reasoning_only:
-                self._ui(self._log, "Reasoning Mode: Prioritizing 'Thought:' and logic-rich data", "warn")
+            if use_reasoning:
+                self._ui(self._log, f"Reasoning mode: weight={reasoning_weight}", "info")
+            if use_curriculum:
+                self._ui(self._log, "Curriculum learning: enabled", "info")
 
-            train_loader, val_loader, tokenizer, info = build_text_loaders(
-                files, seq_len=seq_len, batch_size=batch_size, 
-                reasoning_only=reasoning_only)
-
-            # Wrap train with prefetch — validation stays simple to avoid thread issues
-            from data.prefetch_loader import PrefetchLoader
-            train_loader = PrefetchLoader(train_loader, buffer_size=3)
-
-            n_batches = info["train_batches"]
-            self._ui(self._log,
-                f"Corpus: {info['corpus_chars']:,} chars | "
-                f"vocab={info['vocab_size']} | seq_len={seq_len} | "
-                f"{n_batches:,} batches/epoch", "ok")
-
-            # Warn if still very large
-            if n_batches > 10_000:
-                est_min = n_batches * epochs * 1.0 / 60   # assume 1s/batch
-                self._ui(self._log,
-                    f"Large dataset — {n_batches:,} batches/epoch. "
-                    f"Est {est_min:.0f} min total. Consider fewer epochs.", "warn")
         except Exception as e:
             self._ui(self._log, f"Text data loading failed: {e}", "err")
             self._ui(self._finish_training)
@@ -844,16 +841,8 @@ class TrainingPanel(tk.Frame):
         hidden    = cfg["hidden_dim"]
         num_heads = max(1, min(8, hidden // 64))
         hidden    = (hidden // num_heads) * num_heads
-
-        # Scale down model for large corpora — speed over capacity on CPU
         n_layers  = cfg["num_layers"]
         n_scales  = 3
-        if corpus_size > 5_000_000:
-            n_layers = min(n_layers, 2)
-            n_scales = 2
-            hidden   = min(hidden, 128)
-            num_heads = max(1, min(4, hidden // 64))
-            hidden   = (hidden // num_heads) * num_heads
 
         model = HMTLanguageModel(
             vocab_size = info["vocab_size"],
@@ -896,22 +885,35 @@ class TrainingPanel(tk.Frame):
         else:
             scheduler = None
 
-        # ── 4. Training loop ──────────────────────────────────────────────────
+        # ── 4. Setup reasoning-aware training if enabled ─────────────────────────
+        loss_fn = None
+        if use_reasoning:
+            try:
+                from training.reasoning_trainer import ReasoningAwareLoss, CurriculumScheduler
+                loss_fn = ReasoningAwareLoss(
+                    reasoning_weight=reasoning_weight,
+                    logic_weight=cfg.get("logic_weight", 2.5),
+                    use_focal=use_focal,
+                )
+                curriculum = CurriculumScheduler(total_steps=epochs * steps_per_epoch) if use_curriculum else None
+                self._ui(self._log, f"Reasoning loss active | Curriculum: {use_curriculum}", "info")
+            except ImportError:
+                self._ui(self._log, "Reasoning trainer not available, using standard loss", "warn")
+                use_reasoning = False
+
+        # ── 5. Training loop ──────────────────────────────────────────────────
         best_val    = float("inf")
         best_state  = None
         total_steps = epochs * n_batches
         UI_INTERVAL = 2.0   # seconds between UI refreshes
 
-        # For very large datasets, cap steps per epoch so training is interactive.
-        # 2000 steps/epoch × 266ms = ~9 min/epoch — reasonable on CPU.
         MAX_STEPS_PER_EPOCH = 2000
         steps_per_epoch = min(n_batches, MAX_STEPS_PER_EPOCH)
         if steps_per_epoch < n_batches:
             total_steps = epochs * steps_per_epoch
             self._ui(self._log,
                 f"Capping at {steps_per_epoch:,} steps/epoch "
-                f"(full epoch = {n_batches:,} batches). "
-                f"Model sees a random subset each epoch.", "warn")
+                f"(full epoch = {n_batches:,} batches).", "warn")
 
         last_ui_t = time.time()
 
@@ -923,6 +925,12 @@ class TrainingPanel(tk.Frame):
             epoch_loss = 0.0
             model.train()
             step = 0
+            
+            # Update curriculum if active
+            if curriculum:
+                cur_params = curriculum.step((epoch - 1) * steps_per_epoch)
+                if loss_fn:
+                    loss_fn.reasoning_weight = cur_params["reasoning_weight"]
 
             for xb, yb in train_loader:
                 if self._stop_flag.is_set():
@@ -932,12 +940,28 @@ class TrainingPanel(tk.Frame):
 
                 xb, yb = move_batch((xb, yb), device)
                 
-                # Enhanced training step with reasoning prioritization
-                loss_val = lm_train_step(
-                    model, optimizer, xb, yb,
-                    reasoning_weight = 2.0 if cfg.get("reasoning_only") else 1.0,
-                    tokenizer = tokenizer
-                )
+                # Use reasoning-aware loss or standard
+                if loss_fn:
+                    logits = model(xb)
+                    # Create simple weights (1.0 for all tokens)
+                    weights = torch.ones_like(yb, dtype=torch.float).to(device)
+                    loss_val, metrics = loss_fn(logits, yb, weights)
+                    loss_val = loss_val.item()
+                    
+                    if torch.isnan(loss_val) or torch.isinf(loss_val):
+                        continue
+                    
+                    optimizer.zero_grad()
+                    loss_val.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                else:
+                    loss_val = lm_train_step(
+                        model, optimizer, xb, yb,
+                        reasoning_weight=reasoning_weight,
+                        tokenizer=tokenizer
+                    )
+                
                 epoch_loss += loss_val
                 step += 1
 
@@ -953,6 +977,10 @@ class TrainingPanel(tk.Frame):
                     eta_s      = int((elapsed / done) * (total_steps - done))
                     eta_str    = f"{eta_s//60}m {eta_s%60}s"
                     pct        = (done / total_steps) * 100
+
+                    stage_info = ""
+                    if curriculum:
+                        stage_info = f" [{curriculum.stages[curriculum.current_stage]['name']}]"
 
                     self._ui(self._update_stats,
                              epoch, epochs, avg,
@@ -1497,491 +1525,6 @@ class TrainingPanel(tk.Frame):
             self._ui(self._log, "Training complete.", "ok")
             self._ui(self._save_checkpoint, cfg, model, best_state, data_info)
 
-        self._ui(self._finish_training)
-
-    def _run_hf_dataset_training(self, cfg, files):
-        """Training on HuggingFace datasets."""
-        import torch
-        import torch.optim as optim
-
-        epochs     = cfg["epochs"]
-        batch_size = cfg["batch_size"]
-        lr         = cfg["lr"]
-        start_t    = time.time()
-        dataset_name = cfg.get("dataset_name", "").strip()
-
-        if not dataset_name:
-            self._ui(self._log, "Please enter a dataset name (e.g., wikitext, ianncity/General-Distillation-Prompts-1M)", "err")
-            self._ui(self._finish_training)
-            return
-
-        # ── 1. Load dataset from HuggingFace ───────────────────────────────────
-        try:
-            from data.hf_dataset_loader import build_hf_loaders, DATASETS_AVAILABLE
-            
-            if not DATASETS_AVAILABLE:
-                self._ui(self._log, "datasets library not installed. Run: pip install datasets", "err")
-                self._ui(self._finish_training)
-                return
-
-            self._ui(self._log, f"Loading HuggingFace dataset: {dataset_name}...", "info")
-
-            user_seq_len = cfg.get("seq_len", 0)
-            seq_len = user_seq_len if user_seq_len > 0 else 128
-
-            train_loader, val_loader, tokenizer, info = build_hf_loaders(
-                dataset_name,
-                seq_len=seq_len,
-                batch_size=batch_size,
-                val_split=0.1,
-            )
-
-            from data.prefetch_loader import PrefetchLoader
-            train_loader = PrefetchLoader(train_loader, buffer_size=3)
-
-            self._ui(self._log,
-                f"Dataset: {dataset_name} | "
-                f"{info['corpus_chars']:,} chars | "
-                f"vocab={info['vocab_size']} | "
-                f"{info['train_batches']} batches/epoch", "ok")
-
-        except ImportError as e:
-            self._ui(self._log, f"datasets library required: {e}", "err")
-            self._ui(self._log, "Install with: pip install datasets", "info")
-            self._ui(self._finish_training)
-            return
-        except Exception as e:
-            self._ui(self._log, f"Dataset loading failed: {e}", "err")
-            self._ui(self._finish_training)
-            return
-
-        # ── 2. Build language model ───────────────────────────────────────────
-        from core.text_model import lm_train_step, lm_val_loss, save_lm
-        from core.implementations import HMTLanguageModel
-        hidden    = cfg["hidden_dim"]
-        num_heads = max(1, min(8, hidden // 64))
-        hidden    = (hidden // num_heads) * num_heads
-        n_layers  = cfg["num_layers"]
-        n_scales  = 3
-
-        model = HMTLanguageModel(
-            vocab_size = info["vocab_size"],
-            dim        = hidden,
-            num_layers = n_layers,
-            num_heads  = num_heads,
-            num_scales = n_scales,
-            max_seq    = seq_len,
-            dropout    = 0.1,
-        )
-        param_count = model.count_parameters()
-
-        # ── Device selection ──────────────────────────────────────────────────
-        from core.device_manager import get_best_device, move_batch
-        device, device_name = get_best_device(
-            model_params=param_count, batch_size=batch_size)
-        model = model.to(device)
-        self._ui(self._log,
-            f"HMT-LM: {param_count:,} params | "
-            f"vocab={info['vocab_size']} | "
-            f"dim={hidden} | layers={n_layers}", "ok")
-        self._ui(self._log, f"Device: {device_name}", "info")
-
-        # ── 3. Optimizer ─────────────────────────────────────────────────────
-        opt_name = cfg["optimizer"]
-        if opt_name == "AdamW":
-            optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-        elif opt_name == "SGD":
-            optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
-        else:
-            optimizer = optim.Adam(model.parameters(), lr=lr)
-
-        sched_name = cfg["scheduler"]
-        if sched_name == "CosineAnnealing":
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-        elif sched_name == "StepLR":
-            scheduler = optim.lr_scheduler.StepLR(
-                optimizer, step_size=max(1, epochs // 3), gamma=0.5)
-        else:
-            scheduler = None
-
-        # ── 4. Training loop ──────────────────────────────────────────────────
-        best_val    = float("inf")
-        best_state  = None
-        n_batches   = info["train_batches"]
-        total_steps = epochs * n_batches
-        UI_INTERVAL = 2.0
-        last_ui_t  = time.time()
-
-        MAX_STEPS_PER_EPOCH = 2000
-        steps_per_epoch = min(n_batches, MAX_STEPS_PER_EPOCH)
-        if steps_per_epoch < n_batches:
-            total_steps = epochs * steps_per_epoch
-            self._ui(self._log,
-                f"Capping at {steps_per_epoch:,} steps/epoch "
-                f"(full epoch = {n_batches:,} batches).", "warn")
-
-        for epoch in range(1, epochs + 1):
-            if self._stop_flag.is_set():
-                self._ui(self._log, "Training stopped by user.", "warn")
-                break
-
-            epoch_loss = 0.0
-            model.train()
-            step = 0
-
-            for xb, yb in train_loader:
-                if self._stop_flag.is_set():
-                    break
-                if step >= steps_per_epoch:
-                    break
-
-                xb, yb = move_batch((xb, yb), device)
-                loss_val = lm_train_step(model, optimizer, xb, yb,
-                                        reasoning_weight=1.0, tokenizer=tokenizer)
-                epoch_loss += loss_val
-                step += 1
-
-                now = time.time()
-                if now - last_ui_t >= UI_INTERVAL or step == steps_per_epoch:
-                    last_ui_t  = now
-                    avg        = epoch_loss / step
-                    ppl        = min(math.exp(avg), 9999.0)
-                    cur_lr     = optimizer.param_groups[0]["lr"]
-                    elapsed    = now - start_t
-                    done       = (epoch - 1) * steps_per_epoch + step
-                    eta_s      = int((elapsed / done) * (total_steps - done))
-                    eta_str    = f"{eta_s//60}m {eta_s%60}s"
-                    pct        = (done / total_steps) * 100
-
-                    self._ui(self._update_stats,
-                             epoch, epochs, avg,
-                             max(0.0, 1.0 - avg / 5.0),
-                             cur_lr, eta_str, 0.0, pct)
-
-                    self._ui(self._log,
-                        f"Ep {epoch}/{epochs}  "
-                        f"step {step}/{steps_per_epoch}  "
-                        f"loss={avg:.4f}  ppl={ppl:.1f}", "info")
-
-            if scheduler:
-                scheduler.step()
-
-            avg_loss   = epoch_loss / max(step, 1)
-            perplexity = min(math.exp(avg_loss), 9999.0)
-
-            self._ui(self._log, "Running validation...", "info")
-            val_l = lm_val_loss(model, val_loader, device=device, max_batches=50)
-            val_p = min(math.exp(val_l), 9999.0)
-            if val_l < best_val:
-                best_val   = val_l
-                best_state = {k: v.clone() for k, v in model.state_dict().items()}
-
-            self._ui(self._log,
-                f"── Epoch {epoch}/{epochs} │ "
-                f"loss={avg_loss:.4f}  val={val_l:.4f} │ "
-                f"ppl={perplexity:.1f}  val_ppl={val_p:.1f}", "ok")
-
-            sample = self._lm_sample(model, tokenizer, seq_len)
-            if sample:
-                self._ui(self._log, f"Sample › {sample[:120]}", "info")
-
-        else:
-            self._ui(self._log, "Dataset training complete.", "ok")
-            lm_cfg = {
-                "vocab_size":  info["vocab_size"],
-                "dim":         hidden,
-                "num_layers":  cfg["num_layers"],
-                "num_heads":   num_heads,
-                "num_scales":  3,
-                "max_seq":     seq_len,
-                "dropout":     0.1,
-            }
-            self._ui(self._save_lm_checkpoint, cfg, model, best_state,
-                     tokenizer, lm_cfg, info)
-
-        self._ui(self._finish_training)
-
-    def _ui(self, fn, *args):
-        """Thread-safe UI update helper with safety check."""
-        try:
-            if self.winfo_exists():
-                self.after(0, fn, *args)
-        except Exception:
-            pass # application or widget already destroyed
-
-    def _build_model(self, mtype: str, feat_dim: int,
-                     hidden: int, layers: int, num_classes: int = 1):
-        """
-        Build a real model using the HierarchicalMambaTransformer backbone.
-        All types use the same backbone — only the head differs.
-        """
-        import torch.nn as nn
-        from core.implementations import HMTClassifier
-
-        num_heads = max(1, min(8, hidden // 64))
-        hidden = (hidden // num_heads) * num_heads
-
-        return HMTClassifier(
-            input_dim   = feat_dim,
-            num_classes = num_classes,
-            dim         = hidden,
-            num_layers  = layers,
-            num_heads   = num_heads,
-            num_scales  = 3,
-            dropout     = 0.1,
-        )
-
-    def _update_stats(self, epoch, epochs, loss, acc, lr, eta, refl, pct):
-        self.stat_vars["epoch"].set(f"{epoch}/{epochs}")
-        self.stat_vars["loss"].set(f"{loss:.4f}")
-        self.stat_vars["acc"].set(f"{acc*100:.1f}%")
-        self.stat_vars["lr"].set(f"{lr:.5f}")
-        self.stat_vars["eta"].set(eta)
-        self.stat_vars["refl"].set(f"{refl:.3f}" if refl else "off")
-        self.progress_var.set(pct)
-        self.prog_lbl.config(text=f"Epoch {epoch}/{epochs}  ({pct:.0f}%)")
-        self.loss_chart.push(loss)
-        self.acc_chart.push(acc)
-
-    def _run_reasoning_training(self, cfg, files):
-        """Advanced reasoning-aware training with multi-task learning."""
-        import torch
-        import torch.nn.functional as F
-        
-        try:
-            from training.reasoning_trainer import (
-                ReasoningTrainer,
-                TrainingConfig,
-                ReasoningDataset,
-                MultiFormatDataLoader,
-                ReasoningAwareLoss,
-                CurriculumScheduler,
-            )
-            from data.advanced_tokenizer import ReasoningTokenizer
-        except ImportError as e:
-            self._ui(self._log, f"Reasoning trainer not available: {e}", "err")
-            self._ui(self._log, "Falling back to standard language model training", "warn")
-            self._run_lm_training(cfg, files)
-            return
-        
-        epochs     = cfg["epochs"]
-        batch_size = cfg["batch_size"]
-        lr         = cfg["lr"]
-        start_t    = time.time()
-        seq_len    = cfg.get("seq_len", 256)
-        if seq_len == 0:
-            seq_len = 256
-        
-        # Reasoning settings
-        reasoning_weight = cfg.get("reasoning_weight", 3.0)
-        logic_weight     = cfg.get("logic_weight", 2.5)
-        use_curriculum   = cfg.get("curriculum", True)
-        use_focal        = cfg.get("focal_loss", False)
-        
-        self._ui(self._log, "=== Reasoning-Aware Training ===", "info")
-        self._ui(self._log, f"Reasoning weight: {reasoning_weight}", "info")
-        self._ui(self._log, f"Logic weight: {logic_weight}", "info")
-        self._ui(self._log, f"Curriculum learning: {use_curriculum}", "info")
-        self._ui(self._log, f"Focal loss: {use_focal}", "info")
-        
-        # ── 1. Load data from files ───────────────────────────────────────────
-        try:
-            self._ui(self._log, "Loading training data...", "info")
-            
-            # Load texts from files
-            texts = []
-            for f in files:
-                loader = MultiFormatDataLoader(None, seq_len)
-                try:
-                    loaded = loader.load_file(f)
-                    texts.extend(loaded)
-                    self._ui(self._log, f"Loaded {len(loaded)} texts from {Path(f).name}", "ok")
-                except Exception as e:
-                    self._ui(self._log, f"Error loading {f}: {e}", "err")
-            
-            if not texts:
-                self._ui(self._log, "No text data loaded. Using sample data.", "warn")
-                texts = [
-                    "The reason is that water boils at 100 degrees Celsius.",
-                    "If it rains, then the ground gets wet. It is raining.",
-                    "Therefore, the ground is wet.",
-                    "All humans are mortal. Socrates is human. Therefore, Socrates is mortal.",
-                    "Think step by step. First, identify the premise.",
-                ]
-            
-            self._ui(self._log, f"Total texts: {len(texts)}", "ok")
-            
-        except Exception as e:
-            self._ui(self._log, f"Data loading failed: {e}", "err")
-            self._finish_training()
-            return
-        
-        # ── 2. Create tokenizer and dataset ───────────────────────────────────
-        try:
-            self._ui(self._log, "Building reasoning tokenizer...", "info")
-            tokenizer = ReasoningTokenizer(vocab_size=8192)
-            tokenizer.build(texts)
-            self._ui(self._log, f"Tokenizer vocab: {tokenizer.vocab_size}", "ok")
-            
-            train_ds = ReasoningDataset(
-                texts, tokenizer, seq_len=seq_len,
-                reasoning_weight=reasoning_weight
-            )
-            
-            train_loader = torch.utils.data.DataLoader(
-                train_ds, batch_size=batch_size, shuffle=True, drop_last=True
-            )
-            
-        except Exception as e:
-            self._ui(self._log, f"Tokenizer/dataset creation failed: {e}", "err")
-            self._finish_training()
-            return
-        
-        # ── 3. Build model ──────────────────────────────────────────────────
-        try:
-            from core.implementations import HMTLanguageModel
-            hidden    = cfg["hidden_dim"]
-            num_heads = max(1, min(8, hidden // 64))
-            hidden    = (hidden // num_heads) * num_heads
-            n_layers  = cfg["num_layers"]
-            n_scales  = 3
-            
-            model = HMTLanguageModel(
-                vocab_size = tokenizer.vocab_size,
-                dim        = hidden,
-                num_layers = n_layers,
-                num_heads  = num_heads,
-                num_scales = n_scales,
-                max_seq    = seq_len,
-                dropout    = 0.1,
-            )
-            param_count = sum(p.numel() for p in model.parameters())
-            
-            from core.device_manager import get_best_device
-            device, device_name = get_best_device(param_count, batch_size)
-            model = model.to(device)
-            
-            self._ui(self._log, f"Model: {param_count:,} params | dim={hidden} | layers={n_layers}", "ok")
-            self._ui(self._log, f"Device: {device_name}", "info")
-            
-        except Exception as e:
-            self._ui(self._log, f"Model creation failed: {e}", "err")
-            self._finish_training()
-            return
-        
-        # ── 4. Setup optimizer and loss ─────────────────────────────────────
-        opt_name = cfg["optimizer"]
-        if opt_name == "AdamW":
-            optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-        elif opt_name == "SGD":
-            optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
-        else:
-            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer, max_lr=lr, total_steps=epochs * len(train_loader),
-            pct_start=0.1
-        )
-        
-        loss_fn = ReasoningAwareLoss(
-            reasoning_weight=reasoning_weight,
-            logic_weight=logic_weight,
-            use_focal=use_focal,
-        )
-        
-        # Curriculum scheduler
-        curriculum = CurriculumScheduler(total_steps=epochs * len(train_loader)) if use_curriculum else None
-        
-        # ── 5. Training loop ────────────────────────────────────────────────
-        best_loss    = float("inf")
-        best_state   = None
-        n_batches    = len(train_loader)
-        total_steps  = epochs * n_batches
-        UI_INTERVAL  = 2.0
-        last_ui_t   = time.time()
-        
-        MAX_STEPS_PER_EPOCH = 2000
-        steps_per_epoch = min(n_batches, MAX_STEPS_PER_EPOCH)
-        
-        for epoch in range(1, epochs + 1):
-            if self._stop_flag.is_set():
-                self._ui(self._log, "Training stopped by user.", "warn")
-                break
-            
-            epoch_loss = 0.0
-            model.train()
-            step = 0
-            
-            for batch in train_loader:
-                if self._stop_flag.is_set():
-                    break
-                if step >= steps_per_epoch:
-                    break
-                
-                xb, yb, weights = batch
-                xb, yb, weights = xb.to(device), yb.to(device), weights.to(device)
-                
-                optimizer.zero_grad()
-                logits = model(xb)
-                
-                loss, metrics = loss_fn(logits, yb, weights)
-                
-                if torch.isnan(loss) or torch.isinf(loss):
-                    self._ui(self._log, "NaN/Inf loss, skipping batch", "warn")
-                    continue
-                
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                scheduler.step()
-                
-                epoch_loss += loss.item()
-                step += 1
-                
-                now = time.time()
-                if now - last_ui_t >= UI_INTERVAL or step == steps_per_epoch:
-                    last_ui_t = now
-                    avg_loss   = epoch_loss / step
-                    cur_lr     = optimizer.param_groups[0]["lr"]
-                    elapsed    = now - start_t
-                    done       = (epoch - 1) * steps_per_epoch + step
-                    eta_s      = int((elapsed / done) * (total_steps - done))
-                    eta_str    = f"{eta_s//60}m {eta_s%60}s"
-                    pct        = (done / total_steps) * 100
-                    
-                    stage_info = ""
-                    if curriculum:
-                        stage_info = f" | Stage: {curriculum.stages[curriculum.current_stage]['name']}"
-                    
-                    self._ui(self._update_stats, epoch, epochs, avg_loss,
-                             max(0.0, 1.0 - avg_loss / 5.0),
-                             cur_lr, eta_str, 0.0, pct)
-                    
-                    self._ui(self._log,
-                        f"Ep {epoch}/{epochs} step {step}/{steps_per_epoch} "
-                        f"loss={avg_loss:.4f}{stage_info}", "info")
-            
-            avg_loss = epoch_loss / max(step, 1)
-            if avg_loss < best_loss:
-                best_loss  = avg_loss
-                best_state = {k: v.clone() for k, v in model.state_dict().items()}
-            
-            self._ui(self._log,
-                f"── Epoch {epoch}/{epochs} │ Loss: {avg_loss:.4f} │ Best: {best_loss:.4f}", "ok")
-            
-            # Sample generation
-            sample = self._lm_sample(model, tokenizer, seq_len)
-            if sample:
-                self._ui(self._log, f"Sample › {sample[:120]}", "info")
-        
-        else:
-            self._ui(self._log, "Reasoning training complete!", "ok")
-            # Save checkpoint
-            self._ui(self._save_lm_checkpoint, cfg, model, best_state,
-                     tokenizer, {"vocab_size": tokenizer.vocab_size, "dim": hidden,
-                                "num_layers": n_layers, "num_heads": num_heads,
-                                "num_scales": n_scales, "max_seq": seq_len}, {})
-        
         self._ui(self._finish_training)
 
     def _finish_training(self):
