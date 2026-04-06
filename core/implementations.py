@@ -34,9 +34,27 @@ except ImportError:
     )
 
 try:
-    from core.mamba import MambaBlock
+    from core.mamba import (
+        HierarchicalMambaBlock,
+        create_hierarchical_mamba_stack,
+        hierarchical_mamba_forward,
+        SSMCore,
+    )
 except ImportError:
-    from .mamba import MambaBlock
+    try:
+        from .mamba import (
+            HierarchicalMambaBlock,
+            create_hierarchical_mamba_stack,
+            hierarchical_mamba_forward,
+            SSMCore,
+        )
+    except (ImportError, NameError):
+        HierarchicalMambaBlock = None
+        create_hierarchical_mamba_stack = None
+        hierarchical_mamba_forward = None
+        SSMCore = None
+
+MAMBA_AVAILABLE = HierarchicalMambaBlock is not None
 
 try:
     from core.transformer import TransformerBlock, RotaryEmbedding
@@ -60,10 +78,53 @@ class PositionalEncoding(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# REAL MAMBA BLOCK - Re-exported from core.mamba
+# FALLBACK SIMPLE MAMBA BLOCK (when hierarchical not available)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# MambaBlock is now imported from core.mamba
+class SimpleMambaBlock(nn.Module):
+    """
+    Simple gated state-space block — fallback when HierarchicalMambaBlock unavailable.
+    """
+
+    def __init__(self, dim: int, d_state: int = 16, expand: int = 2,
+                 dt_rank: int = None, conv_size: int = 4, dropout: float = 0.0):
+        super().__init__()
+        self.dim     = dim
+        self.d_inner = expand * dim
+        self.dropout = dropout
+
+        self.in_proj = nn.Linear(dim, 2 * self.d_inner, bias=False)
+        self.conv1d  = nn.Conv1d(
+            self.d_inner, self.d_inner,
+            kernel_size=conv_size, padding=conv_size - 1,
+            groups=self.d_inner, bias=True)
+        self.W_f = nn.Linear(self.d_inner, self.d_inner, bias=True)
+        self.W_i = nn.Linear(self.d_inner, self.d_inner, bias=True)
+        self.W_o = nn.Linear(self.d_inner, dim, bias=False)
+
+        self.norm = nn.LayerNorm(dim)
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+        nn.init.constant_(self.W_f.bias, 1.0)
+        nn.init.zeros_(self.W_i.bias)
+        nn.init.xavier_uniform_(self.in_proj.weight)
+        nn.init.xavier_uniform_(self.W_o.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, _ = x.shape
+        residual = x
+
+        xz       = self.in_proj(x)
+        x_in, z  = xz.chunk(2, dim=-1)
+        xc = self.conv1d(x_in.transpose(1, 2))[:, :, :T]
+        xc = F.silu(xc).transpose(1, 2)
+        h = xc
+        out = self.W_o(h * F.silu(z))
+        return self.norm(self.drop(out) + residual)
+
+
+# Backward compatibility alias
+MambaBlock = SimpleMambaBlock
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -121,20 +182,25 @@ class HierarchicalMambaTransformer(nn.Module):
         self.max_seq    = max_seq
         self.use_gc     = use_gradient_checkpointing
 
-        # ── Multi-scale input branches ────────────────────────────────────
-        scale_dims = [max(dim // (2 ** i), 64) for i in range(num_scales)]
-        self.scale_projs_in  = nn.ModuleList([
-            nn.Linear(dim, sd, bias=False) for sd in scale_dims])
-        self.scale_projs_out = nn.ModuleList([
-            nn.Linear(sd, dim, bias=False) for sd in scale_dims])
-        # Learned fusion weights
-        self.scale_weights = nn.Parameter(torch.ones(num_scales) / num_scales)
+        # ── Use Hierarchical Mamba blocks from core.mamba ─────────────────
+        if MAMBA_AVAILABLE and HierarchicalMambaBlock is not None:
+            self.mamba_blocks = nn.ModuleList([
+                HierarchicalMambaBlock(
+                    dim=dim,
+                    d_state=16,
+                    expand=2,
+                    num_scales=num_scales,
+                    dropout=dropout,
+                )
+                for _ in range(num_layers)
+            ])
+        else:
+            # Fallback to simple mamba block
+            self.mamba_blocks = nn.ModuleList([
+                SimpleMambaBlock(dim, d_state=16, expand=2, dropout=dropout)
+                for _ in range(num_layers)
+            ])
 
-        # ── Depth stack: alternating Mamba + Transformer ──────────────────
-        self.mamba_blocks = nn.ModuleList([
-            MambaBlock(dim, d_state=16, expand=2, dropout=dropout)
-            for _ in range(num_layers)
-        ])
         self.attn_blocks = nn.ModuleList([
             TransformerBlock(dim, num_heads=num_heads,
                              ff_mult=4, dropout=dropout,

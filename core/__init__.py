@@ -10,6 +10,7 @@ from core.architecture import (
 
 from core.implementations import (
     MambaBlock,
+    SimpleMambaBlock,
     TransformerBlock,
     HierarchicalMambaTransformer,
     HierarchicalMambaEncoder,
@@ -29,7 +30,15 @@ from core.implementations import (
     VideoFeeder,
 )
 
-from core.mamba import MambaBlock, create_mamba_stack, mamba_forward_stack
+from core.mamba import (
+    HierarchicalMambaBlock,
+    SSMCore,
+    parallel_scan_log,
+    selective_scan,
+    create_hierarchical_mamba_stack,
+    hierarchical_mamba_forward,
+    MAMBA_AVAILABLE as HIERARCHICAL_MAMBA_AVAILABLE,
+)
 from core.transformer import (
     TransformerBlock,
     TransformerDecoderBlock,
