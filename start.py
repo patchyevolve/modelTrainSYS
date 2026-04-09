@@ -375,6 +375,20 @@ def _cmd_inference():
     import subprocess
     subprocess.run([sys.executable] + args)
 
+def _cmd_csv_train(data_file: str):
+    import subprocess
+    cmd = [sys.executable, "utils/csv_workflow.py", "train", "--data", data_file]
+    subprocess.run(cmd)
+
+
+def _cmd_csv_predict(model_file: str, data_file: str):
+    import subprocess
+    cmd = [
+        sys.executable, "utils/csv_workflow.py", "predict",
+        "--model", model_file, "--data", data_file, "--save"
+    ]
+    subprocess.run(cmd)
+
 
 def _cmd_upgrade():
     health_check(verbose=False)
@@ -430,6 +444,16 @@ if __name__ == "__main__":
 
     elif flag in ("inference", "infer"):
         _cmd_inference()
+    elif flag in ("csv-train", "train-csv"):
+        if len(args) < 2:
+            print(yellow("Usage: python start.py --csv-train <data.csv>"))
+            sys.exit(1)
+        _cmd_csv_train(args[1])
+    elif flag in ("csv-predict", "predict-csv"):
+        if len(args) < 3:
+            print(yellow("Usage: python start.py --csv-predict <model.pt> <data.csv>"))
+            sys.exit(1)
+        _cmd_csv_predict(args[1], args[2])
 
     elif flag in ("upgrade", "upg"):
         _cmd_upgrade()
@@ -460,5 +484,6 @@ if __name__ == "__main__":
     else:
         print(yellow(f"Unknown flag: {args[0]}"))
         print(dim("  Valid: --ui  --chat  --inference  --upgrade  "
-                  "--list  --check  --install  --load <name>"))
+                  "--list  --check  --install  --load <name>  "
+                  "--csv-train <data.csv>  --csv-predict <model.pt> <data.csv>"))
         sys.exit(1)

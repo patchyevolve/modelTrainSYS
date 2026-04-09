@@ -32,14 +32,21 @@ def _rebuild_cybersecurity(feat_dim: int, hidden: int) -> nn.Module:
     )
 
 
-def _rebuild_hierarchical(feat_dim: int, hidden: int, n_layers: int, num_classes: int = 1) -> nn.Module:
+def _rebuild_hierarchical(
+    feat_dim: int,
+    hidden: int,
+    n_layers: int,
+    num_classes: int = 1,
+    num_heads: int = 0,
+) -> nn.Module:
     """
     Rebuild the FULL HMTClassifier (input_proj + backbone + head).
     This matches the architecture that was actually saved during training.
     """
     from core.implementations import HMTClassifier
     
-    num_heads = max(1, min(8, hidden // 64))
+    if num_heads <= 0:
+        num_heads = max(1, min(8, hidden // 64))
     hidden = (hidden // num_heads) * num_heads
     
     model = HMTClassifier(
@@ -66,6 +73,7 @@ def _rebuild_from_state_dict(state_dict: dict, config: dict, data_info: dict) ->
         feat_dim = data_info.get("feature_dim", 16)
         hidden = config.get("hidden_dim", 128)
         n_layers = config.get("num_layers", 3)
+        num_heads = config.get("num_heads", 0)
         
         # Extract num_classes from the saved head layer
         if "head.proj.weight" in state_dict:
@@ -75,7 +83,9 @@ def _rebuild_from_state_dict(state_dict: dict, config: dict, data_info: dict) ->
         else:
             saved_classes = data_info.get("num_classes", 1)
         
-        return _rebuild_hierarchical(feat_dim, hidden, n_layers, saved_classes)
+        return _rebuild_hierarchical(
+            feat_dim, hidden, n_layers, saved_classes, num_heads=num_heads
+        )
     
     # Detect HMTImageClassifier (has patch_embed + backbone + head)
     if "patch_embed.proj.weight" in keys and "backbone.mamba_blocks" in keys:
@@ -106,7 +116,9 @@ def _rebuild_from_state_dict(state_dict: dict, config: dict, data_info: dict) ->
     hidden = config.get("hidden_dim", 128)
     n_layers = config.get("num_layers", 3)
     num_classes = data_info.get("num_classes", 1)
-    return _rebuild_hierarchical(feat_dim, hidden, n_layers, num_classes)
+    return _rebuild_hierarchical(
+        feat_dim, hidden, n_layers, num_classes, num_heads=config.get("num_heads", 0)
+    )
 
 
 def rebuild_model(config: dict, data_info: dict) -> nn.Module:
@@ -198,9 +210,12 @@ def run_inference(model: nn.Module, data_info: dict,
                 xb = xb[:, :expected]
 
             logits = model(xb)
-            is_binary = data_info.get("is_binary", True)
+            # Determine binary vs multiclass from model output shape first.
+            is_binary = (logits.dim() == 2 and logits.shape[1] == 1)
+            if logits.dim() == 1:
+                is_binary = True
             if is_binary:
-                probs = torch.sigmoid(logits).squeeze(1)
+                probs = torch.sigmoid(logits.view(-1))
                 preds = (probs >= threshold).long()
             else:
                 probs = torch.softmax(logits, dim=-1).max(dim=1).values

@@ -1,12 +1,14 @@
 @echo off
-setlocal EnableDelayedExpansion
+setlocal EnableExtensions EnableDelayedExpansion
 
 chcp 65001 >nul 2>&1
 title ML Training System
 
-set "SCRIPT_DIR=%~dp0"
+set "ROOT=%~dp0"
+cd /d "%ROOT%"
+
 set "PYTHON="
-set "PYVER="
+set "PYVER=unknown"
 
 for /f %%a in ('echo prompt $E ^| cmd') do set "ESC=%%a"
 set "RESET=%ESC%[0m"
@@ -18,109 +20,155 @@ set "RED=%ESC%[91m"
 set "WHITE=%ESC%[97m"
 set "DIM=%ESC%[2m"
 
-:: Find Python
-if exist "%SCRIPT_DIR%venv\Scripts\python.exe" (
-    set "PYTHON=%SCRIPT_DIR%venv\Scripts\python.exe"
-) else if exist "%SCRIPT_DIR%.venv\Scripts\python.exe" (
-    set "PYTHON=%SCRIPT_DIR%.venv\Scripts\python.exe"
-) else (
-    for %%P in (python python3 py) do (
-        if "!PYTHON!"=="" (
-            %%P --version >nul 2>&1 && set "PYTHON=%%P"
-        )
-    )
-)
-
-if "!PYTHON!"=="" (
+call :find_python
+if not defined PYTHON (
     echo.
-    echo  %RED%[ERROR] Python not found%RESET%
-    echo  Install from https://python.org
+    echo  %RED%[ERROR] Python not found.%RESET%
+    echo  Install Python 3.10+ from https://python.org and re-run.
     pause
     exit /b 1
 )
 
-for /f "tokens=2" %%V in ('!PYTHON! --version 2^>^&1') do set "PYVER=%%V"
+for /f "tokens=2" %%V in ('%PYTHON% --version 2^>^&1') do set "PYVER=%%V"
 
-:: Parse arguments
-if not "%~1"=="" goto :parse_arg
+if not "%~1"=="" goto :parse_args
 
 :menu
 cls
 echo.
-echo  %CYAN%%BOLD%========================================%RESET%
-echo  %CYAN%%BOLD%     ML TRAINING SYSTEM                 %RESET%
-echo  %CYAN%%BOLD%========================================%RESET%
+echo  %CYAN%%BOLD%===============================================%RESET%
+echo  %CYAN%%BOLD%  ML TRAINING SYSTEM - WINDOWS LAUNCHER       %RESET%
+echo  %CYAN%%BOLD%===============================================%RESET%
 echo.
-echo  %DIM%  Python: !PYVER!%RESET%
+echo  %DIM%Project: %ROOT%%RESET%
+echo  %DIM%Python : %PYTHON%  (%PYVER%)%RESET%
 echo.
-echo  %WHITE%  [1]%RESET%  Training GUI
-echo  %WHITE%  [2]%RESET%  Chat with Model
-echo  %WHITE%  [3]%RESET%  Run Inference
-echo  %WHITE%  [4]%RESET%  List Models
-echo  %WHITE%  [5]%RESET%  Auto-Upgrade
-echo  %WHITE%  [6]%RESET%  Health Check
-echo  %WHITE%  [7]%RESET%  Install Dependencies
-echo  %WHITE%  [X]%RESET%  Exit
+echo  %WHITE%[1]%RESET%  Training GUI
+echo  %WHITE%[2]%RESET%  Chat with model
+echo  %WHITE%[3]%RESET%  Run inference (interactive)
+echo  %WHITE%[4]%RESET%  List trained models
+echo  %WHITE%[5]%RESET%  Health check
+echo  %WHITE%[6]%RESET%  Auto-upgrade window
+echo  %WHITE%[7]%RESET%  Install dependencies
+echo  %WHITE%[8]%RESET%  CSV Train (quick)
+echo  %WHITE%[9]%RESET%  CSV Predict (quick)
+echo  %WHITE%[C]%RESET%  CI local smoke (test_models + production_smoke)
+echo  %WHITE%[X]%RESET%  Exit
 echo.
-set /p "CHOICE=%BOLD%  > %RESET%"
+set /p "CHOICE=%BOLD%> %RESET%"
 
-if "%CHOICE%"=="1" goto :do_gui
-if "%CHOICE%"=="2" goto :do_chat
-if "%CHOICE%"=="3" goto :do_inference
-if "%CHOICE%"=="4" goto :do_list
-if "%CHOICE%"=="5" goto :do_upgrade
-if "%CHOICE%"=="6" goto :do_check
-if "%CHOICE%"=="7" goto :do_install
+if /i "%CHOICE%"=="1" call :run_start --ui & goto :menu
+if /i "%CHOICE%"=="2" call :run_start --chat & goto :menu
+if /i "%CHOICE%"=="3" call :run_start --inference & goto :menu
+if /i "%CHOICE%"=="4" call :run_start --list & goto :menu
+if /i "%CHOICE%"=="5" call :run_start --check & goto :menu
+if /i "%CHOICE%"=="6" call :run_start --upgrade & goto :menu
+if /i "%CHOICE%"=="7" call :install_deps & goto :menu
+if /i "%CHOICE%"=="8" call :menu_csv_train & goto :menu
+if /i "%CHOICE%"=="9" call :menu_csv_predict & goto :menu
+if /i "%CHOICE%"=="C" call :ci_local & goto :menu
 if /i "%CHOICE%"=="X" exit /b 0
-
 goto :menu
 
-:do_gui
-!PYTHON! start.py --ui
-goto :menu
+:parse_args
+set "CMD=%~1"
+shift
+if /i "%CMD%"=="ui"          call :run_start --ui %* & exit /b %ERRORLEVEL%
+if /i "%CMD%"=="chat"        call :run_start --chat %* & exit /b %ERRORLEVEL%
+if /i "%CMD%"=="infer"       call :run_start --inference %* & exit /b %ERRORLEVEL%
+if /i "%CMD%"=="inference"   call :run_start --inference %* & exit /b %ERRORLEVEL%
+if /i "%CMD%"=="list"        call :run_start --list %* & exit /b %ERRORLEVEL%
+if /i "%CMD%"=="check"       call :run_start --check %* & exit /b %ERRORLEVEL%
+if /i "%CMD%"=="upgrade"     call :run_start --upgrade %* & exit /b %ERRORLEVEL%
+if /i "%CMD%"=="install"     call :install_deps & exit /b %ERRORLEVEL%
+if /i "%CMD%"=="csv-train"   call :csv_train %* & exit /b %ERRORLEVEL%
+if /i "%CMD%"=="csv-predict" call :csv_predict %* & exit /b %ERRORLEVEL%
+if /i "%CMD%"=="ci-local"    call :ci_local & exit /b %ERRORLEVEL%
+if /i "%CMD%"=="help"        goto :help
+echo %RED%Unknown command: %CMD%%RESET%
+goto :help
 
-:do_chat
-!PYTHON! start.py --chat
-goto :menu
+:run_start
+%PYTHON% start.py %*
+exit /b %ERRORLEVEL%
 
-:do_inference
-!PYTHON! start.py --inference
-goto :menu
+:csv_train
+if "%~1"=="" (
+    echo %YELLOW%Usage: run.bat csv-train ^<data.csv^>%RESET%
+    exit /b 1
+)
+%PYTHON% start.py --csv-train "%~1"
+exit /b %ERRORLEVEL%
 
-:do_list
-!PYTHON! start.py --list
-goto :menu
+:csv_predict
+if "%~2"=="" (
+    echo %YELLOW%Usage: run.bat csv-predict ^<model.pt^> ^<data.csv^>%RESET%
+    exit /b 1
+)
+%PYTHON% start.py --csv-predict "%~1" "%~2"
+exit /b %ERRORLEVEL%
 
-:do_upgrade
-!PYTHON! start.py --upgrade
-goto :menu
+:menu_csv_train
+set "CSV_FILE="
+echo.
+set /p "CSV_FILE=Path to CSV file: "
+if not defined CSV_FILE exit /b 0
+call :csv_train "%CSV_FILE%"
+exit /b 0
 
-:do_check
-!PYTHON! start.py --check
-goto :menu
+:menu_csv_predict
+set "MODEL_FILE="
+set "CSV_FILE="
+echo.
+set /p "MODEL_FILE=Path to model (.pt): "
+if not defined MODEL_FILE exit /b 0
+set /p "CSV_FILE=Path to CSV file: "
+if not defined CSV_FILE exit /b 0
+call :csv_predict "%MODEL_FILE%" "%CSV_FILE%"
+exit /b 0
 
-:do_install
-!PYTHON! -m pip install torch torchvision numpy pandas Pillow
-goto :menu
+:ci_local
+echo.
+echo %CYAN%Running local CI smoke...%RESET%
+%PYTHON% test_models.py
+if errorlevel 1 exit /b 1
+%PYTHON% production_smoke.py
+exit /b %ERRORLEVEL%
 
-:parse_arg
-set "ARG=%~1"
-if /i "%ARG%"=="gui"       goto :do_gui
-if /i "%ARG%"=="chat"      goto :do_chat
-if /i "%ARG%"=="infer"     goto :do_inference
-if /i "%ARG%"=="list"      goto :do_list
-if /i "%ARG%"=="upgrade"   goto :do_upgrade
-if /i "%ARG%"=="smart"     goto :do_smart
-if /i "%ARG%"=="check"     goto :do_check
-if /i "%ARG%"=="help"      goto :do_help
-echo  Unknown: %ARG%
-exit /b 1
+:install_deps
+echo.
+echo %CYAN%Installing dependencies...%RESET%
+%PYTHON% -m pip install --upgrade pip
+%PYTHON% -m pip install torch torchvision numpy pandas Pillow tkinterdnd2
+exit /b %ERRORLEVEL%
 
-:do_smart
-!PYTHON! start.py --smart
-goto :menu
+:find_python
+if exist "%ROOT%venv\Scripts\python.exe" set "PYTHON=%ROOT%venv\Scripts\python.exe"
+if not defined PYTHON if exist "%ROOT%.venv\Scripts\python.exe" set "PYTHON=%ROOT%.venv\Scripts\python.exe"
+if not defined PYTHON (
+    for %%P in (python python3 py) do (
+        if not defined PYTHON (
+            %%P --version >nul 2>&1 && set "PYTHON=%%P"
+        )
+    )
+)
+exit /b 0
 
-:do_help
-echo  Usage: run.bat [command]
-echo  Commands: gui chat infer list upgrade smart check help
+:help
+echo.
+echo Usage: run.bat [command] [args]
+echo.
+echo Commands:
+echo   ui                       Open training UI
+echo   chat [model_name]        Chat with model
+echo   infer                    Interactive inference
+echo   list                     List models
+echo   check                    Health check
+echo   upgrade                  Open upgrade window
+echo   install                  Install dependencies
+echo   csv-train ^<data.csv^>     Train classifier from CSV
+echo   csv-predict ^<model.pt^> ^<data.csv^>  Predict from CSV
+echo   ci-local                 Run local smoke checks
+echo   help                     Show this help
+echo.
 exit /b 0

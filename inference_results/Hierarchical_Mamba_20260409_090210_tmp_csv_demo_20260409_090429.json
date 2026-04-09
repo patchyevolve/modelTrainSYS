@@ -1,0 +1,21 @@
+{
+  "total_samples": 20,
+  "threshold": 0.5,
+  "accuracy": 0.35,
+  "precision": 0.2,
+  "recall": 0.1,
+  "f1_score": 0.13333333333333333,
+  "false_positive_rate": 0.4,
+  "tp": 1,
+  "tn": 6,
+  "fp": 4,
+  "fn": 9,
+  "attack_detected": 5,
+  "benign_detected": 15,
+  "avg_confidence": 0.7599095106124878,
+  "high_confidence": 7,
+  "low_confidence": 0,
+  "model": "Hierarchical_Mamba_20260409_090210",
+  "data_file": "tmp_csv_demo.csv",
+  "timestamp": "2026-04-09T09:04:29.637360"
+}
