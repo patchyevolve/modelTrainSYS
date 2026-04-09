@@ -326,23 +326,28 @@ def _cmd_ui():
     system     = build_default_system(with_upgrade=True)
     upgrade_sys = system.modules.get("auto_upgrade")
 
-    try:
-        from tkinterdnd2 import TkinterDnD
-        from ui import training_ui as ui
-        class App(ui.TrainingApp, TkinterDnD.Tk):
-            def __init__(self):
-                TkinterDnD.Tk.__init__(self)
-                ui.TrainingApp.__init__(self, skip_init=True)
-                self._upgrade_system = upgrade_sys
-        app = App()
-        app.mainloop()
-    except Exception as e:
-        # Be resilient: if DnD mode fails, fall back to standard Tk UI.
-        print(yellow(f"UI DnD mode unavailable, falling back to standard UI: {e}"))
-        from ui import training_ui as ui
-        app = ui.TrainingApp()
-        app._upgrade_system = upgrade_sys
-        app.mainloop()
+    # Stable default: standard Tk UI.
+    # Optional DnD mode can be enabled with MLSYS_USE_DND=1.
+    use_dnd = os.environ.get("MLSYS_USE_DND", "0") == "1"
+    if use_dnd:
+        try:
+            from tkinterdnd2 import TkinterDnD
+            from ui import training_ui as ui
+            class App(ui.TrainingApp, TkinterDnD.Tk):
+                def __init__(self):
+                    TkinterDnD.Tk.__init__(self)
+                    ui.TrainingApp.__init__(self, skip_init=True)
+                    self._upgrade_system = upgrade_sys
+            app = App()
+            app.mainloop()
+            return
+        except Exception as e:
+            print(yellow(f"DnD mode failed, using standard UI: {e}"))
+
+    from ui import training_ui as ui
+    app = ui.TrainingApp()
+    app._upgrade_system = upgrade_sys
+    app.mainloop()
 
 
 def _cmd_chat(model_name):
