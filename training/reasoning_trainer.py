@@ -204,6 +204,13 @@ class ReasoningAwareLoss(nn.Module):
         # Apply token weights
         if weights is not None:
             weights_flat = weights.view(-1)
+            # Optional global boost for highlighted reasoning tokens.
+            if self.reasoning_weight > 1.0:
+                weights_flat = torch.where(
+                    weights_flat > 1.0,
+                    weights_flat * self.reasoning_weight,
+                    weights_flat,
+                )
             # Normalize weights
             weight_sum = weights_flat.sum() + 1e-8
             loss = (ce_loss * weights_flat).sum() / weight_sum

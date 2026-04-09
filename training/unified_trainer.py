@@ -62,6 +62,7 @@ class TrainConfig:
     curriculum: bool = False
     focal_loss: bool = False
     dataset_name: str = ""
+    reasoning_only: bool = False
 
 
 @dataclass
@@ -136,6 +137,12 @@ class UnifiedTrainer:
     def run(self) -> TrainResult:
         """Main training entry point."""
         self.log(f"Starting {self.config.model_type.value} training...")
+        if self.config.use_reflector:
+            self.log(
+                "Reflector is enabled in config. UnifiedTrainer currently applies reasoning-aware "
+                "training only; dedicated reflector-integrated training is in training/reflector_trainer.py.",
+                "warn",
+            )
         try:
             if self.config.model_type == ModelType.LANGUAGE_MODEL:
                 return self._train_lm()
@@ -182,6 +189,44 @@ class UnifiedTrainer:
         elif sched == "StepLR":
             self.scheduler = torch.optim.lr_scheduler.StepLR(
                 self.optimizer, step_size=max(1, self.config.epochs // 3), gamma=0.5)
+
+    def _build_reasoning_weights(self, yb: torch.Tensor, boost: float) -> torch.Tensor:
+        """
+        Build token-level weights for reasoning-heavy spans.
+        Uses lightweight keyword matching on decoded char-level sequences.
+        """
+        weights = torch.ones_like(yb, dtype=torch.float, device=yb.device)
+        if boost <= 1.0 or self.tokenizer is None:
+            return weights
+        if not hasattr(self.tokenizer, "decode"):
+            return weights
+
+        keywords = (
+            "because", "therefore", "reason", "thought", "hence",
+            "since", "thus", "step", "logic", "if", "then",
+        )
+        try:
+            y_cpu = yb.detach().cpu().tolist()
+            for i, row in enumerate(y_cpu):
+                text = self.tokenizer.decode(row, skip_special=False).lower()
+                if not text:
+                    continue
+                for kw in keywords:
+                    start = 0
+                    while True:
+                        pos = text.find(kw, start)
+                        if pos < 0:
+                            break
+                        # Char-level tokenizer: token index ~= char index.
+                        lo = max(0, pos)
+                        hi = min(len(row), pos + len(kw) + 8)  # include local context after keyword
+                        if hi > lo:
+                            weights[i, lo:hi] = boost
+                        start = pos + 1
+        except Exception:
+            return torch.ones_like(yb, dtype=torch.float, device=yb.device)
+
+        return weights
     
     def _train_lm(self) -> TrainResult:
         """Train language model."""
@@ -205,8 +250,14 @@ class UnifiedTrainer:
                 return None
             
             self.train_loader, self.val_loader, self.tokenizer, self.data_info = build_text_loaders(
-                self.files, seq_len=self.config.seq_len, batch_size=self.config.batch_size)
+                self.files,
+                seq_len=self.config.seq_len,
+                batch_size=self.config.batch_size,
+                reasoning_only=self.config.reasoning_only,
+            )
             self.log(f"Corpus: {self.data_info['corpus_chars']:,} chars, vocab={self.data_info['vocab_size']}")
+            if self.config.reasoning_only:
+                self.log("Reasoning-only dataset filter is enabled.")
         
         # Build model
         hidden = self.config.hidden_dim
@@ -283,12 +334,17 @@ class UnifiedTrainer:
                 
                 if loss_fn:
                     logits = self.model(xb)
-                    weights = torch.ones_like(yb, dtype=torch.float).to(self.device)
-                    loss, _ = loss_fn(logits, yb, weights)
+                    weights = self._build_reasoning_weights(
+                        yb, boost=float(loss_fn.reasoning_weight)
+                    )
+                    loss, loss_meta = loss_fn(logits, yb, weights)
                     
                     loss_val = loss.item()
                     if math.isnan(loss_val) or math.isinf(loss_val):
                         continue
+                    if step == 0:
+                        pct = 100.0 * float(loss_meta.get("high_weight_tokens", 0.0))
+                        self.log(f"Reasoning token emphasis active: {pct:.1f}% tokens boosted.")
                     
                     self.optimizer.zero_grad()
                     loss.backward()

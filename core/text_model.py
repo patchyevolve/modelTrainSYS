@@ -6,12 +6,15 @@ This file re-exports it under the old names so training_ui.py and
 model_chat.py keep working without changes.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from core.implementations import HMTLanguageModel as MambaLM   # same API
+
+if TYPE_CHECKING:
+    from data.text_dataset import CharTokenizer
 
 
 # ── Training helpers ──────────────────────────────────────────────────────────

@@ -431,6 +431,7 @@ class TrainingPanel(tk.Frame):
             curriculum=cfg.get("curriculum", False),
             focal_loss=cfg.get("focal_loss", False),
             dataset_name=cfg.get("dataset_name", ""),
+            reasoning_only=cfg.get("reasoning_only", False),
         )
         
         # Create trainer

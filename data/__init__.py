@@ -9,9 +9,16 @@ from data.data_loader import (
 from data.text_dataset import (
     CharTokenizer, TextLMDataset, read_text_files, build_text_loaders
 )
-from data.image_dataset import (
-    ImageFolderDataset, discover_images, get_transforms, build_image_loaders
-)
+# torchvision is optional; keep base/text pipelines importable without it.
+try:
+    from data.image_dataset import (
+        ImageFolderDataset, discover_images, get_transforms, build_image_loaders
+    )
+except ImportError:
+    ImageFolderDataset = None
+    discover_images = None
+    get_transforms = None
+    build_image_loaders = None
 from data.prefetch_loader import PrefetchLoader
 from data.advanced_tokenizer import (
     AdvancedTokenizer,
