@@ -1,0 +1,9 @@
+# Default code owners
+# Replace `@your-org/maintainers` with your actual GitHub team or usernames.
+* @your-org/maintainers
+
+# Optional: narrower ownership by area
+# /core/ @your-org/modeling-team
+# /training/ @your-org/modeling-team
+# /ui/ @your-org/app-team
+# /.github/ @your-org/maintainers

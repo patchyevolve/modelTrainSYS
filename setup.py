@@ -4,8 +4,7 @@ Run: python setup.py build_ext --inplace
 """
 
 from setuptools import setup, Extension
-from setuptools.command.build_ext import build_ext
-import sys
+from pathlib import Path
 import setuptools
 import torch
 from torch.utils import cpp_extension
@@ -13,43 +12,37 @@ from torch.utils import cpp_extension
 class get_pybind_include:
     """Helper for getting pybind11 include directory"""
     def __str__(self):
-        return cpp_extension.include_paths(torch=True)[0]
+        return cpp_extension.include_paths()[0]
 
 
-# C++ Extensions
-ext_modules = [
-    Extension(
-        'mlsystem.cpp.mamba_kernel',
-        ['mlsystem/cpp/mamba_kernel.cpp'],
-        include_dirs=[
-            get_pybind_include(),
-            torch.utils.cpp_extension.include_paths(torch=True)[0]
-        ],
-        language='c++',
-        extra_compile_args=['-O3', '-march=native'],
-    ),
-    Extension(
-        'mlsystem.cpp.reflector_kernel',
-        ['mlsystem/cpp/reflector_kernel.cpp'],
-        include_dirs=[
-            get_pybind_include(),
-            torch.utils.cpp_extension.include_paths(torch=True)[0]
-        ],
-        language='c++',
-        extra_compile_args=['-O3', '-march=native'],
-    ),
-]
+ROOT = Path(__file__).parent
+ext_modules = []
+
+mamba_src = ROOT / "mamba_kernel.cpp"
+if mamba_src.exists():
+    ext_modules.append(
+        Extension(
+            "mamba_kernel",
+            [str(mamba_src)],
+            include_dirs=[
+                get_pybind_include(),
+                torch.utils.cpp_extension.include_paths()[0],
+            ],
+            language="c++",
+            extra_compile_args=["-O3"],
+        )
+    )
 
 setup(
     name='mlsystem',
     version='1.0.0',
     author='ML System Contributors',
     description='Hierarchical Mamba + Transformer ML System',
-    long_description=open('README.md').read(),
+    long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type='text/markdown',
     packages=setuptools.find_packages(),
     ext_modules=ext_modules,
-    cmdclass={'build_ext': cpp_extension.BuildExtension},
+    cmdclass={"build_ext": cpp_extension.BuildExtension},
     install_requires=[
         'torch>=2.0.0',
         'numpy',

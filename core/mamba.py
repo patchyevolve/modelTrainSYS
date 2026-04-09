@@ -7,6 +7,7 @@ DirectML: Uses chunked parallel computation
 """
 
 import math
+import os
 from typing import List, Optional
 
 import torch
@@ -14,6 +15,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 MAMBA_AVAILABLE = True
+
+try:
+    import mamba_kernel as _native_mamba_kernel
+    NATIVE_MAMBA_AVAILABLE = hasattr(_native_mamba_kernel, "selective_scan_forward")
+except Exception:
+    _native_mamba_kernel = None
+    NATIVE_MAMBA_AVAILABLE = False
 
 
 def parallel_scan_cpu(
@@ -72,6 +80,21 @@ def selective_scan(
     d_state = A.shape[1]
 
     dt = F.softplus(dt)
+
+    # Native kernel fast path (optional): same tensor shapes/math as Python path.
+    # We keep this off for chunked mode and non CPU/CUDA devices.
+    use_native = (
+        NATIVE_MAMBA_AVAILABLE
+        and not use_chunked
+        and x.device.type in ("cpu", "cuda")
+        and os.environ.get("MAMBA_NATIVE_DISABLE", "0") != "1"
+    )
+    if use_native:
+        try:
+            return _native_mamba_kernel.selective_scan_forward(x, dt, A, B, C, D)
+        except Exception:
+            # Fall back to pure PyTorch path for robustness.
+            pass
 
     dA = torch.exp(dt.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0))
     dBx = dt.unsqueeze(-1) * B.unsqueeze(2) * x.unsqueeze(-1)
@@ -189,12 +212,32 @@ class HierarchicalMambaBlock(nn.Module):
         if stride == 1:
             return x
         B, T, D = x.shape
+        # Tabular / length-1 sequences: without padding, T_trim becomes 0 for stride>1
+        # and pooling/interpolate paths break. Pad by repeating the last timestep.
+        if T < stride:
+            pad = stride - T
+            last = x[:, -1:, :]
+            x = torch.cat([x, last.expand(-1, pad, -1)], dim=1)
+            T = x.shape[1]
         T_trim = (T // stride) * stride
         return x[:, :T_trim, :].reshape(B, T_trim // stride, stride, D).mean(2)
 
     def _upsample(self, x: torch.Tensor, T_target: int) -> torch.Tensor:
-        if x.shape[1] == T_target:
+        B, T, D = x.shape
+        if T == T_target:
             return x
+        if T_target > T:
+            indices = torch.linspace(0, T - 1, T_target, device=x.device, dtype=x.dtype)
+            indices_floor = indices.floor().long()
+            indices_ceil = indices.ceil().long().clamp(max=T - 1)
+            t = (indices - indices_floor).unsqueeze(-1)
+            idx_floor = indices_floor.unsqueeze(0).unsqueeze(-1).expand(B, -1, D)
+            idx_ceil = indices_ceil.unsqueeze(0).unsqueeze(-1).expand(B, -1, D)
+            x_floor = x.gather(1, idx_floor)
+            x_ceil = x.gather(1, idx_ceil)
+            return x_floor * (1 - t) + x_ceil * t
+        indices = torch.arange(T_target, device=x.device)
+        scale = T / T_target
         return F.interpolate(x.transpose(1, 2), size=T_target, mode='linear', align_corners=False).transpose(1, 2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -266,3 +309,4 @@ if __name__ == "__main__":
     assert y.shape == (B, T, dim)
     print(f"HierarchicalMambaBlock  in={tuple(x.shape)}  out={tuple(y.shape)}  ✓")
     print(f"Uses parallel: {block._use_parallel()}")
+    print(f"Native kernel available: {NATIVE_MAMBA_AVAILABLE}")

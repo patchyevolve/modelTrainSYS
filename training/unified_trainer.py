@@ -25,6 +25,7 @@ from core.implementations import HMTLanguageModel, HMTClassifier, HMTImageClassi
 from core.text_model import lm_train_step, lm_val_loss, save_lm
 from core.device_manager import get_best_device, move_batch
 from data.text_dataset import build_text_loaders
+from training.reasoning_trainer import ReasoningAwareLoss, CurriculumScheduler
 from data.image_dataset import build_image_loaders
 from data.data_loader import build_loaders
 
@@ -71,6 +72,15 @@ class TrainResult:
     metrics: Dict[str, List[float]]
     info: Dict
     tokenizer: Any = None
+
+
+class TrainingRuntimeError(RuntimeError):
+    """Structured runtime error with stable error code."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"[{code}] {message}")
+        self.code = code
+        self.message = message
 
 
 class UnifiedTrainer:
@@ -126,19 +136,30 @@ class UnifiedTrainer:
     def run(self) -> TrainResult:
         """Main training entry point."""
         self.log(f"Starting {self.config.model_type.value} training...")
-        
-        if self.config.model_type == ModelType.LANGUAGE_MODEL:
-            return self._train_lm()
-        elif self.config.model_type == ModelType.IMAGE_CLASSIFIER:
-            return self._train_image()
-        elif self.config.model_type == ModelType.CLASSIFIER:
-            return self._train_tabular()
-        else:
-            return self._train_tabular()
+        try:
+            if self.config.model_type == ModelType.LANGUAGE_MODEL:
+                return self._train_lm()
+            elif self.config.model_type == ModelType.IMAGE_CLASSIFIER:
+                return self._train_image()
+            elif self.config.model_type == ModelType.CLASSIFIER:
+                return self._train_tabular()
+            else:
+                return self._train_tabular()
+        except TrainingRuntimeError:
+            raise
+        except Exception as e:
+            raise TrainingRuntimeError("TRN-RUN-001", str(e)) from e
     
     def _setup_device(self, param_count: int, batch_size: int):
         """Setup compute device."""
-        self.device, name = get_best_device(param_count, batch_size)
+        # Production-safe policy:
+        # - Prefer CUDA when present.
+        # - Otherwise force CPU. DirectML has shown unstable behavior in LM/tabular training.
+        try:
+            force = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            force = "cpu"
+        self.device, name = get_best_device(param_count, batch_size, force=force)
         self.log(f"Device: {name}")
     
     def _create_optimizer(self):
@@ -164,8 +185,6 @@ class UnifiedTrainer:
     
     def _train_lm(self) -> TrainResult:
         """Train language model."""
-        from training.reasoning_trainer import ReasoningAwareLoss, CurriculumScheduler
-        
         self.log("Loading text data...")
         
         # Load data
@@ -231,6 +250,13 @@ class UnifiedTrainer:
         n_batches = self.data_info.get("train_batches", 100)
         max_steps = min(n_batches, 2000)
         total_steps = self.config.epochs * max_steps
+        self.log(
+            f"LM setup: train_batches={n_batches}, max_steps={max_steps}, "
+            f"batch={self.config.batch_size}, seq_len={self.config.seq_len}"
+        )
+        if max_steps <= 0:
+            self.log("No training batches available for current settings.", "err")
+            return None
         
         for epoch in range(1, self.config.epochs + 1):
             if self.stop_flag and self.stop_flag.is_set():
@@ -258,14 +284,14 @@ class UnifiedTrainer:
                 if loss_fn:
                     logits = self.model(xb)
                     weights = torch.ones_like(yb, dtype=torch.float).to(self.device)
-                    loss_val, _ = loss_fn(logits, yb, weights)
-                    loss_val = loss_val.item()
+                    loss, _ = loss_fn(logits, yb, weights)
                     
+                    loss_val = loss.item()
                     if math.isnan(loss_val) or math.isinf(loss_val):
                         continue
                     
                     self.optimizer.zero_grad()
-                    loss_val.backward()
+                    loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                     self.optimizer.step()
                 else:
@@ -277,10 +303,13 @@ class UnifiedTrainer:
                 
                 epoch_loss += loss_val
                 step += 1
+
+                if step == 1:
+                    self.log("First training step completed; progress will update continuously.")
                 
                 # Progress update
                 now = time.time()
-                if step % 10 == 0 or step == max_steps:
+                if step == 1 or step % 5 == 0 or step == max_steps:
                     avg_loss = epoch_loss / max(step, 1)
                     elapsed = now - self.start_time
                     done = (epoch - 1) * max_steps + step
@@ -347,10 +376,10 @@ class UnifiedTrainer:
         
         # Build model
         self.model = HMTImageClassifier(
-            input_dim=self.data_info.get("input_dim", 224 * 224 * 3),
             num_classes=len(class_names),
             dim=self.config.hidden_dim,
             num_layers=self.config.num_layers,
+            num_heads=self.config.num_heads,
             dropout=0.1,
         )
         
@@ -432,7 +461,11 @@ class UnifiedTrainer:
             self.files, batch_size=self.config.batch_size)
         
         num_classes = self.data_info.get("num_classes", 2)
-        num_features = self.data_info.get("num_features", self.config.hidden_dim)
+        # data_loader reports `feature_dim`; keep `num_features` for compatibility.
+        num_features = self.data_info.get(
+            "feature_dim",
+            self.data_info.get("num_features", self.config.hidden_dim),
+        )
         
         self.log(f"Features: {num_features}, Classes: {num_classes}")
         
@@ -453,7 +486,12 @@ class UnifiedTrainer:
         max_steps = min(len(self.train_loader), 2000)
         total_steps = self.config.epochs * max_steps
         
-        criterion = nn.CrossEntropyLoss() if num_classes > 1 else nn.BCEWithLogitsLoss()
+        if num_classes > 1:
+            # Classification
+            criterion = nn.CrossEntropyLoss()
+        else:
+            # Regression
+            criterion = nn.MSELoss()
         
         for epoch in range(1, self.config.epochs + 1):
             if self.stop_flag and self.stop_flag.is_set():
@@ -476,16 +514,20 @@ class UnifiedTrainer:
                 self.optimizer.zero_grad()
                 outputs = self.model(xb)
                 
-                if num_classes == 1:
-                    yb = yb.float().unsqueeze(1)
-                loss = criterion(outputs, yb)
+                if num_classes > 1:
+                    # CrossEntropy expects (B,) long labels
+                    loss = criterion(outputs, yb.squeeze(1).long())
+                else:
+                    # MSE expects same shape (B, 1) float labels
+                    loss = criterion(outputs, yb.float())
+
                 loss.backward()
                 self.optimizer.step()
                 
                 epoch_loss += loss.item()
                 if num_classes > 1:
                     _, predicted = outputs.max(1)
-                    correct += predicted.eq(yb).sum().item()
+                    correct += predicted.eq(yb.squeeze(1)).sum().item()
                 total += yb.size(0)
                 step += 1
                 

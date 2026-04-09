@@ -171,6 +171,43 @@ torch::Tensor correct_output(
     return result;
 }
 
+/*
+ * Native selective scan matching Python implementation:
+ * x:  [B, T, D]
+ * dt: [B, T, D] (already softplus'd from Python)
+ * A:  [D, S]
+ * B:  [B, T, S]
+ * C:  [B, T, S]
+ * D:  [D]
+ */
+torch::Tensor selective_scan_forward(
+    torch::Tensor x,
+    torch::Tensor dt,
+    torch::Tensor A,
+    torch::Tensor B,
+    torch::Tensor C,
+    torch::Tensor D) {
+    
+    const auto B_batch = x.size(0);
+    const auto T = x.size(1);
+    const auto d_inner = x.size(2);
+    const auto d_state = A.size(1);
+
+    auto dA = torch::exp(dt.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0));
+    auto dBx = dt.unsqueeze(-1) * B.unsqueeze(2) * x.unsqueeze(-1);
+
+    const auto flat_len = d_inner * d_state;
+    auto log_dA = torch::log(dA.clamp_min(1e-38)).view({B_batch, T, flat_len});
+    auto log_dBx = torch::log(dBx.clamp_min(1e-38)).view({B_batch, T, flat_len});
+
+    auto a_star = torch::cumsum(log_dA, 1);
+    auto log_x0_plus_b_star = torch::logcumsumexp(log_dBx - a_star, 1);
+    auto h = torch::exp(a_star + log_x0_plus_b_star).view({B_batch, T, d_inner, d_state});
+
+    auto y = torch::einsum("bts,btds->btd", {C, h}) + D * x;
+    return y;
+}
+
 } // namespace mamba
 
 // Python bindings
@@ -191,4 +228,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     
     m.def("correct_output", &mamba::correct_output,
           "Output correction");
+
+    m.def("selective_scan_forward", &mamba::selective_scan_forward,
+          "Selective scan forward (native)");
 }
