@@ -71,7 +71,34 @@ if /i "%CHOICE%"=="X" exit /b 0
 goto :menu
 
 :parse_args
+set "ORIG_CMD=%~1"
 set "CMD=%~1"
+REM Same flags as: python start.py --ui  (users often copy that style)
+if /i "%CMD%"=="--ui"         set "CMD=ui"
+if /i "%CMD%"=="-ui"          set "CMD=ui"
+if /i "%CMD%"=="gui"          set "CMD=ui"
+if /i "%CMD%"=="--chat"       set "CMD=chat"
+if /i "%CMD%"=="-chat"        set "CMD=chat"
+if /i "%CMD%"=="--inference"  set "CMD=infer"
+if /i "%CMD%"=="-inference"   set "CMD=infer"
+if /i "%CMD%"=="--infer"      set "CMD=infer"
+if /i "%CMD%"=="--list"       set "CMD=list"
+if /i "%CMD%"=="-list"        set "CMD=list"
+if /i "%CMD%"=="--models"      set "CMD=list"
+if /i "%CMD%"=="--check"      set "CMD=check"
+if /i "%CMD%"=="-check"       set "CMD=check"
+if /i "%CMD%"=="--health"     set "CMD=check"
+if /i "%CMD%"=="--upgrade"    set "CMD=upgrade"
+if /i "%CMD%"=="--upg"        set "CMD=upgrade"
+if /i "%CMD%"=="--install"    set "CMD=install"
+if /i "%CMD%"=="-install"     set "CMD=install"
+if /i "%CMD%"=="--csv-train"  set "CMD=csv-train"
+if /i "%CMD%"=="--csv-predict" set "CMD=csv-predict"
+if /i "%CMD%"=="--ci-local"   set "CMD=ci-local"
+if /i "%CMD%"=="--help"       goto :help
+if /i "%CMD%"=="-h"           goto :help
+if /i "%CMD%"=="/?"           goto :help
+
 shift
 if /i "%CMD%"=="ui"          call :run_start --ui %* & exit /b %ERRORLEVEL%
 if /i "%CMD%"=="chat"        call :run_start --chat %* & exit /b %ERRORLEVEL%
@@ -85,7 +112,8 @@ if /i "%CMD%"=="csv-train"   call :csv_train %* & exit /b %ERRORLEVEL%
 if /i "%CMD%"=="csv-predict" call :csv_predict %* & exit /b %ERRORLEVEL%
 if /i "%CMD%"=="ci-local"    call :ci_local & exit /b %ERRORLEVEL%
 if /i "%CMD%"=="help"        goto :help
-echo %RED%Unknown command: %CMD%%RESET%
+echo %RED%Unknown command: %ORIG_CMD%%RESET%
+echo %DIM%Tip: use  run.bat ui   or   run.bat --ui   same as  python start.py --ui%RESET%
 goto :help
 
 :run_start
@@ -157,18 +185,19 @@ exit /b 0
 :help
 echo.
 echo Usage: run.bat [command] [args]
+echo   run.bat ui  and  run.bat --ui  both open the GUI (same as python start.py --ui^)
 echo.
-echo Commands:
-echo   ui                       Open training UI
-echo   chat [model_name]        Chat with model
-echo   infer                    Interactive inference
-echo   list                     List models
-echo   check                    Health check
-echo   upgrade                  Open upgrade window
-echo   install                  Install dependencies
+echo Commands (also accept --name where shown):
+echo   ui, --ui                  Open training UI
+echo   chat, --chat              Chat with model
+echo   infer, --infer            Interactive inference
+echo   list, --list              List models
+echo   check, --check            Health check
+echo   upgrade, --upgrade        Open upgrade window
+echo   install, --install        Install dependencies
 echo   csv-train ^<data.csv^>     Train classifier from CSV
 echo   csv-predict ^<model.pt^> ^<data.csv^>  Predict from CSV
-echo   ci-local                 Run local smoke checks
-echo   help                     Show this help
+echo   ci-local                  Run local smoke checks
+echo   help, -h, /?              Show this help
 echo.
 exit /b 0

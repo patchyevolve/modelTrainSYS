@@ -26,8 +26,12 @@ from ui.components import DropZone, DataPanel, LineChart
 from ui.inference_window import InferenceWindow
 from ui.health_window import HealthPanel
 from training.unified_trainer import (
-    UnifiedTrainer, TrainConfig, ModelType, DATASETS_AVAILABLE, TrainingRuntimeError
+    UnifiedTrainer, TrainConfig, ModelType, TrainingRuntimeError
 )
+try:
+    from data.hf_dataset_loader import DATASETS_AVAILABLE as HF_DATASETS_AVAILABLE
+except Exception:
+    HF_DATASETS_AVAILABLE = False
 
 # ─── Training Config + Status Panel (center) ─────────────────────────────────
 
@@ -159,8 +163,13 @@ class TrainingPanel(tk.Frame):
         tk.Entry(ds_row, textvariable=self.dataset_var, bg=BG_INPUT, fg=TEXT_PRI,
                  insertbackground=TEXT_PRI, relief="flat",
                  font=("Segoe UI", 9), width=24).pack(side="left", padx=4)
-        tk.Label(ds_row, text=" (wikitext, etc.)", fg=TEXT_SEC,
-                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
+        tk.Label(
+            ds_row,
+            text=" (Text Generation only — e.g. wikitext, user/dataset)",
+            fg=TEXT_SEC,
+            bg=BG_CARD,
+            font=("Segoe UI", 8),
+        ).pack(side="left")
 
         # Reasoning Settings (for Text Generation)
         tk.Label(cfg_frame, text="── Text/Reasoning Settings ──", fg=ACCENT2, bg=BG_CARD,
@@ -381,13 +390,45 @@ class TrainingPanel(tk.Frame):
         cfg = self._get_config()
         task = MODEL_REGISTRY.get(cfg["model_type"], {}).get("task", "binary_classification")
         dataset_name = (cfg.get("dataset_name") or "").strip()
-        # LM on HuggingFace Hub: files optional when datasets lib is available
-        hf_lm_ok = task == "language_model" and bool(dataset_name) and DATASETS_AVAILABLE
+        is_lm = task == "language_model"
 
-        if not hf_lm_ok and not files:
-            messagebox.showwarning("No Data",
-                "Please add training files before starting "
-                "(or enter an HF dataset name for Text Generation).")
+        # HF Hub is only loaded for Text Generation; other model types need local files.
+        if dataset_name and not is_lm and not files:
+            messagebox.showwarning(
+                "HF Dataset — wrong model type",
+                "You entered an HF dataset name, but \"Hierarchical Mamba\", "
+                "\"Transformer\", etc. train on local files (.csv, .txt, …), not "
+                "the Hugging Face field.\n\n"
+                "To train on a Hugging Face dataset, set Model Type to "
+                "\"Text Generation\", then use the HF name (or add text files).\n\n"
+                "To keep this model type, add files in the data list and you can "
+                "clear the HF field.",
+            )
+            return
+
+        # If they typed an HF name but `datasets` isn't importable, explain clearly (don't say "add files").
+        if is_lm and dataset_name and not HF_DATASETS_AVAILABLE:
+            messagebox.showwarning(
+                "Hugging Face `datasets` not available",
+                "You entered an HF dataset name, but the Hugging Face stack failed to "
+                "load in this Python (missing package or incompatible pyarrow).\n\n"
+                "Try, using the same Python as this app:\n"
+                "  pip install -U datasets pyarrow\n\n"
+                "If errors persist, upgrade pyarrow to match your Python version:\n"
+                "  pip install -U \"pyarrow>=14\"",
+            )
+            return
+
+        # LM: local files OR Hub name (Hub requires HF_DATASETS_AVAILABLE, checked above).
+        data_ok = bool(files) or (is_lm and bool(dataset_name) and HF_DATASETS_AVAILABLE)
+        if not data_ok:
+            messagebox.showwarning(
+                "No Data",
+                "For Text Generation: add training files (.txt, .csv, …) or enter an HF "
+                "dataset name (e.g. wikitext, username/dataset) and install "
+                "`pip install datasets`.\n"
+                "Other model types require files in the list.",
+            )
             return
         ok, reason = self.controller.validate_runtime_config(cfg)
         if not ok:

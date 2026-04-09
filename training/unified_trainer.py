@@ -249,10 +249,17 @@ class UnifiedTrainer:
                 self.log(f"Dataset load failed: {e}", "err")
                 return None
         else:
+            if self.config.dataset_name and not DATASETS_AVAILABLE:
+                self.log(
+                    "HF dataset name was set but the `datasets` package is not available. "
+                    "Run: pip install datasets",
+                    "err",
+                )
+                return None
             if not self.files:
                 self.log("No files provided", "err")
                 return None
-            
+
             self.train_loader, self.val_loader, self.tokenizer, self.data_info = build_text_loaders(
                 self.files,
                 seq_len=self.config.seq_len,

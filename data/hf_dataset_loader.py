@@ -17,16 +17,36 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+load_dataset = None  # set when import succeeds
 try:
     from datasets import load_dataset, Dataset as HFDataset
+
     DATASETS_AVAILABLE = True
-except ImportError:
+except Exception:
+    # ImportError if missing; AttributeError/OSError if pyarrow/datasets binary mismatch.
     DATASETS_AVAILABLE = False
     HFDataset = None
+    load_dataset = None
 
 from data.text_dataset import CharTokenizer, TextLMDataset
 
 log = logging.getLogger("DatasetLoader")
+
+
+def _column_to_pylist(column) -> List:
+    """
+    HF `datasets` returns a pyarrow-backed Column for `ds[col]` in recent versions;
+    it has `to_pylist()`, not `tolist()`. Older code / numpy uses `tolist()`.
+    """
+    if isinstance(column, list):
+        return column
+    to_pylist = getattr(column, "to_pylist", None)
+    if callable(to_pylist):
+        return to_pylist()
+    tolist = getattr(column, "tolist", None)
+    if callable(tolist):
+        return tolist()
+    return list(column)
 
 
 class HuggingFaceTextDataset(Dataset):
@@ -147,12 +167,8 @@ def build_hf_loaders(
             text_column = dataset.column_names[0]
             log.warning(f"Text column '{text_column}' not found, using first column")
     
-    texts = dataset[text_column]
-    
-    if isinstance(texts, list):
-        text_list = [str(t) for t in texts if t is not None]
-    else:
-        text_list = [str(t) for t in texts.tolist() if t is not None]
+    texts = _column_to_pylist(dataset[text_column])
+    text_list = [str(t) for t in texts if t is not None]
     
     log.info(f"Extracted {len(text_list)} text samples")
     
@@ -224,13 +240,17 @@ def load_classification_dataset(
                 break
     
     if label_column in dataset.column_names:
-        labels = dataset[label_column]
-        if hasattr(labels, 'features'):
-            info['num_classes'] = len(labels.features[label_column].names)
-            info['class_names'] = labels.features[label_column].names
+        feat = getattr(dataset, "features", None)
+        if feat is not None and label_column in feat and getattr(
+            feat[label_column], "names", None
+        ):
+            names = feat[label_column].names
+            info["num_classes"] = len(names)
+            info["class_names"] = names
         else:
-            unique_labels = set(labels)
-            info['num_classes'] = len(unique_labels)
+            label_vals = _column_to_pylist(dataset[label_column])
+            unique_labels = set(label_vals)
+            info["num_classes"] = len(unique_labels)
     
     info['text_column'] = text_column
     info['label_column'] = label_column
