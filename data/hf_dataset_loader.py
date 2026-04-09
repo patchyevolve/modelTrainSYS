@@ -11,6 +11,7 @@ Supports:
 """
 
 import logging
+import os
 from typing import List, Tuple, Dict, Optional, Callable
 from pathlib import Path
 
@@ -31,6 +32,72 @@ except Exception:
 from data.text_dataset import CharTokenizer, TextLMDataset
 
 log = logging.getLogger("DatasetLoader")
+
+
+def _hf_hub_token(override: Optional[str] = None):
+    """
+    Prefer HF_TOKEN env; otherwise let huggingface_hub use the cached CLI login
+    (same as passing token=True), which avoids unauthenticated Hub warnings when logged in.
+    """
+    if override:
+        return override
+    env = os.environ.get("HF_TOKEN", "").strip()
+    if env:
+        return env
+    return True
+
+
+_LM_TEXT_PRIORITY: Tuple[str, ...] = (
+    "text",
+    "content",
+    "body",
+    "input",
+    "output",
+    "sentence",
+    "prompt",
+    "instruction",
+    "query",
+    "response",
+    "completion",
+    "message",
+    "messages",
+    "dialogue",
+    "utterance",
+    "conversations",
+)
+
+_NON_TEXT_COL_LOWERCASE = frozenset(
+    {
+        "id",
+        "idx",
+        "index",
+        "_id",
+        "row",
+        "split",
+        "shard",
+        "label",
+        "labels",
+        "target",
+        "meta",
+        "metadata",
+    }
+)
+
+
+def _infer_lm_text_column(column_names: List[str]) -> str:
+    """
+    Choose a column for char-LM training. Skips obvious id/meta columns when possible.
+    """
+    name_set = set(column_names)
+    for key in _LM_TEXT_PRIORITY:
+        if key in name_set:
+            return key
+    for c in column_names:
+        cl = c.lower()
+        if cl in _NON_TEXT_COL_LOWERCASE or cl.startswith("_"):
+            continue
+        return c
+    return column_names[0]
 
 
 def _column_to_pylist(column) -> List:
@@ -100,14 +167,18 @@ def load_hf_dataset(
         )
     
     log.info(f"Loading dataset: {dataset_name}")
-    
+
+    ld_kwargs = dict(kwargs)
+    if "token" not in ld_kwargs:
+        ld_kwargs["token"] = _hf_hub_token()
+
     try:
         dataset = load_dataset(
             dataset_name,
             split=split,
             cache_dir=cache_dir,
             trust_remote_code=trust_remote_code,
-            **kwargs
+            **ld_kwargs,
         )
     except ValueError as e:
         if "split" in str(e):
@@ -116,7 +187,7 @@ def load_hf_dataset(
                 split="all",
                 cache_dir=cache_dir,
                 trust_remote_code=trust_remote_code,
-                **kwargs
+                **ld_kwargs,
             )
         else:
             raise
@@ -156,16 +227,16 @@ def build_hf_loaders(
         (train_loader, val_loader, tokenizer, info_dict)
     """
     dataset, info = load_hf_dataset(dataset_name, "all", text_column, cache_dir, **kwargs)
-    
+
     if text_column not in dataset.column_names:
-        text_cols = ["text", "content", "input", "output", "sentence"]
-        for col in text_cols:
-            if col in dataset.column_names:
-                text_column = col
-                break
-        else:
-            text_column = dataset.column_names[0]
-            log.warning(f"Text column '{text_column}' not found, using first column")
+        requested = text_column
+        text_column = _infer_lm_text_column(list(dataset.column_names))
+        log.warning(
+            "No column named %r; using %r for language modeling (available: %s).",
+            requested,
+            text_column,
+            list(dataset.column_names),
+        )
     
     texts = _column_to_pylist(dataset[text_column])
     text_list = [str(t) for t in texts if t is not None]
