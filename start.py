@@ -334,8 +334,11 @@ def _cmd_ui():
                 TkinterDnD.Tk.__init__(self)
                 ui.TrainingApp.__init__(self, skip_init=True)
                 self._upgrade_system = upgrade_sys
-        App().mainloop()
-    except ImportError:
+        app = App()
+        app.mainloop()
+    except Exception as e:
+        # Be resilient: if DnD mode fails, fall back to standard Tk UI.
+        print(yellow(f"UI DnD mode unavailable, falling back to standard UI: {e}"))
         from ui import training_ui as ui
         app = ui.TrainingApp()
         app._upgrade_system = upgrade_sys
