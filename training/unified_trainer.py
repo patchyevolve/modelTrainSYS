@@ -26,8 +26,12 @@ from core.text_model import lm_train_step, lm_val_loss, save_lm
 from core.device_manager import get_best_device, move_batch
 from data.text_dataset import build_text_loaders
 from training.reasoning_trainer import ReasoningAwareLoss, CurriculumScheduler
-from data.image_dataset import build_image_loaders
 from data.data_loader import build_loaders
+
+try:
+    from data.image_dataset import build_image_loaders
+except Exception:
+    build_image_loaders = None
 
 try:
     from data.hf_dataset_loader import build_hf_loaders, DATASETS_AVAILABLE
@@ -420,6 +424,11 @@ class UnifiedTrainer:
     def _train_image(self) -> TrainResult:
         """Train image classifier."""
         self.log("Loading image data...")
+        if build_image_loaders is None:
+            raise TrainingRuntimeError(
+                "TRN-IMG-001",
+                "Image training requires torchvision. Install with: pip install torchvision",
+            )
         
         if not self.files:
             self.log("No files provided", "err")
