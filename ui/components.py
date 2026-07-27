@@ -6,7 +6,7 @@ Contains standalone widgets like DropZone, DataPanel, and LineChart.
 import tkinter as tk
 from tkinter import ttk, filedialog
 from pathlib import Path
-from ui.theme import (
+from .theme import (
     BG_PANEL, BG_CARD, BG_INPUT, ACCENT2, BORDER, TEXT_PRI, TEXT_SEC, 
     TEXT_ERR, TEXT_OK, DRAG_OVER, SUPPORTED_EXTS, ALL_EXTS, 
     styled_frame, label, section_title, ghost_btn

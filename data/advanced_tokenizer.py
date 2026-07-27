@@ -1,353 +1,173 @@
 """
-Advanced Tokenizer with Reasoning-Aware Tokenization
-==================================================
-Features:
-- BPE-style subword tokenization for better quality
-- Special tokens for reasoning markers
-- Logical operator tokens
-- Sentence boundary detection
+Advanced Tokenizer — BPE subword tokenizer with reasoning markers.
+Wraps HuggingFace tokenizers when available; pure-Python fallback.
 """
 
 import json
-import re
-from typing import List, Dict, Set, Tuple, Optional
-from collections import Counter, defaultdict
 import logging
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
 
 log = logging.getLogger("AdvancedTokenizer")
 
+HF_AVAILABLE = False
+try:
+    from tokenizers import Tokenizer as HFTokenizer
+    from tokenizers.models import BPE
+    from tokenizers.trainers import BpeTrainer
+    from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer
+    from tokenizers.normalizers import NFKC
+    from tokenizers.processors import TemplateProcessing
+    from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+    HF_AVAILABLE = True
+except ImportError:
+    HFTokenizer = None
+
 
 class AdvancedTokenizer:
-    """
-    Hybrid tokenizer combining:
-    - BPE subword tokenization for quality
-    - Special reasoning tokens
-    - Logical operator tokens
-    """
-    
-    # Special tokens
-    PAD   = "<PAD>"
-    UNK   = "<UNK>"
-    BOS   = "<BOS>"
-    EOS   = "<EOS>"
-    MASK  = "<MASK>"
-    
-    # Reasoning tokens
-    REASON_START = "<REASON>"
-    REASON_END   = "</REASON>"
-    THOUGHT      = "<THOUGHT>"
-    STEP         = "<STEP>"
-    CONCLUSION   = "<CONCLUSION>"
-    
-    # Logical tokens
-    THEREFORE  = "<THEREFORE>"
-    BECAUSE    = "<BECAUSE>"
-    IF         = "<IF>"
-    THEN       = "<THEN>"
-    AND        = "<AND>"
-    OR         = "<OR>"
-    NOT        = "<NOT>"
-    SINCE      = "<SINCE>"
-    HENCE      = "<HENCE>"
-    
-    # Question tokens
-    QUESTION = "<QUESTION>"
-    ANSWER  = "<ANSWER>"
-    
-    # Meta tokens
-    CONTEXT  = "<CONTEXT>"
-    RESPONSE = "<RESPONSE>"
-    
-    SPECIAL_TOKENS = [
-        PAD, UNK, BOS, EOS, MASK,
-        REASON_START, REASON_END, THOUGHT, STEP, CONCLUSION,
-        THEREFORE, BECAUSE, IF, THEN, AND, OR, NOT, SINCE, HENCE,
-        QUESTION, ANSWER, CONTEXT, RESPONSE
-    ]
-    
-    def __init__(self, vocab_size: int = 8192, min_freq: int = 2):
+    PAD = "<PAD>"
+    UNK = "<UNK>"
+    BOS = "<BOS>"
+    EOS = "<EOS>"
+
+    SPECIAL_TOKENS = [PAD, UNK, BOS, EOS]
+
+    def __init__(self, vocab_size: int = 8192):
         self.vocab_size = vocab_size
-        self.min_freq = min_freq
-        self.char2idx: Dict[str, int] = {}
-        self.idx2char: Dict[int, str] = {}
-        self.vocab: Set[str] = set()
-        self.merges: List[Tuple[str, str]] = []
-        self._special_token_ids: Dict[str, int] = {}
-        
-        # Reasoning patterns for loss weighting
-        self.reasoning_patterns = [
-            r"<REASON>|</REASON>",
-            r"because|since|therefore|hence|thus",
-            r"if.*then|when.*then|since.*then",
-            r"step\s*\d+|\d+\.",
-            r"conclusion:|in conclusion|finally",
-            r"first|second|third|finally",
-            r"however|although|but|yet",
-            r"so|therefore|consequently",
-            r"the reason is|this means|this implies",
-            r"think|believe|consider|analyze",
-        ]
-        self.reasoning_regex = re.compile('|'.join(self.reasoning_patterns), re.IGNORECASE)
-    
+        self._hf: Optional['HFTokenizer'] = None
+        self._vocab: Dict[str, int] = {}
+        self._id2tok: Dict[int, str] = {}
+        self._use_hf = HF_AVAILABLE
+
     def build(self, texts: List[str]) -> None:
-        """Build vocabulary from texts."""
-        log.info(f"Building vocabulary from {len(texts)} texts...")
-        
-        # Initialize with special tokens
-        for i, token in enumerate(self.SPECIAL_TOKENS):
-            self._special_token_ids[token] = i
-        
-        # Count character frequencies
-        char_freq = Counter()
-        for text in texts:
-            for char in text:
-                char_freq[char] += 1
-        
-        # Initialize vocab with characters
-        self.vocab = {c for c, f in char_freq.items() if f >= self.min_freq}
-        
-        # Initialize mappings
+        if self._use_hf and HFTokenizer is not None:
+            self._build_hf(texts)
+        else:
+            self._build_fallback(texts)
+
+    def _build_hf(self, texts: List[str]) -> None:
+        tokenizer = HFTokenizer(BPE(unk_token=self.UNK))
+        tokenizer.normalizer = NFKC()
+        tokenizer.pre_tokenizer = ByteLevelPreTokenizer(add_prefix_space=False)
+        tokenizer.decoder = ByteLevelDecoder()
+        tokenizer.post_processor = TemplateProcessing(
+            single=f"{self.BOS} $A {self.EOS}",
+            pair=f"{self.BOS} $A {self.EOS} $B:1 {self.EOS}:1",
+            special_tokens=[
+                (self.PAD, 0), (self.UNK, 1), (self.BOS, 2), (self.EOS, 3),
+            ],
+        )
+        trainer = BpeTrainer(
+            vocab_size=self.vocab_size,
+            special_tokens=self.SPECIAL_TOKENS,
+            show_progress=True,
+            initial_alphabet=ByteLevelPreTokenizer.alphabet(),
+        )
+        tokenizer.train_from_iterator(texts, trainer=trainer)
+        self._hf = tokenizer
+        self._vocab = tokenizer.get_vocab()
+        self._id2tok = {v: k for k, v in self._vocab.items()}
+        log.info(f"HF BPE tokenizer: vocab={tokenizer.get_vocab_size()}")
+
+    def _build_fallback(self, texts: List[str]) -> None:
+        from collections import Counter
+        self._vocab = {t: i for i, t in enumerate(self.SPECIAL_TOKENS)}
         next_id = len(self.SPECIAL_TOKENS)
-        self.char2idx = {t: i for i, t in enumerate(self.SPECIAL_TOKENS)}
-        for c in self.vocab:
-            if c not in self.char2idx:
-                self.char2idx[c] = next_id
-                next_id += 1
-        
-        # BPE merges
-        self._build_bpe(texts)
-        
-        # Finalize vocab
-        self._finalize_vocab()
-        
-        log.info(f"Vocabulary built: {len(self.char2idx)} tokens")
-    
-    def _build_bpe(self, texts: List[str], num_merges: int = 1000):
-        """Build BPE merges from texts."""
-        # Tokenize into words
-        words = []
+
+        word_freq = Counter()
         for text in texts:
-            # Split on whitespace and punctuation
-            tokens = re.findall(r'\w+|[^\w\s]', text)
-            words.extend([tuple(t) for t in tokens if t])
-        
-        # Count bigram frequencies
-        while len(self.merges) < num_merges and len(self.vocab) < self.vocab_size:
-            # Count all bigrams
-            bigram_freq = Counter()
-            for word in words:
-                for i in range(len(word) - 1):
-                    bigram = (word[i], word[i+1])
-                    bigram_freq[bigram] += 1
-            
-            if not bigram_freq:
+            for word in text.strip().split():
+                word_freq[word] += 1
+
+        sorted_words = sorted(word_freq, key=lambda w: -word_freq[w])
+        for w in sorted_words:
+            if next_id >= self.vocab_size:
                 break
-            
-            # Find most common bigram
-            best_bigram = bigram_freq.most_common(1)[0][0]
-            
-            # Merge in all words
-            new_words = []
-            for word in words:
-                new_word = []
-                i = 0
-                while i < len(word):
-                    if i < len(word) - 1 and (word[i], word[i+1]) == best_bigram:
-                        new_word.append(best_bigram[0] + best_bigram[1])
-                        i += 2
-                    else:
-                        new_word.append(word[i])
-                        i += 1
-                new_words.append(tuple(new_word))
-            
-            words = new_words
-            self.merges.append(best_bigram)
-            self.vocab.add(best_bigram[0] + best_bigram[1])
-            
-            if len(self.merges) % 100 == 0:
-                log.info(f"BPE merge {len(self.merges)}: {best_bigram[0]}+{best_bigram[1]} (freq={bigram_freq[best_bigram]})")
-    
-    def _finalize_vocab(self):
-        """Finalize vocabulary mappings."""
-        self.idx2char = {i: t for t, i in self.char2idx.items()}
-        self.vocab_size = len(self.char2idx)
-    
-    def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
-        """Encode text to token IDs with reasoning markers."""
+            if w not in self._vocab:
+                self._vocab[w] = next_id
+                next_id += 1
+
+        self._id2tok = {v: k for k, v in self._vocab.items()}
+        actual_vs = len(self._vocab)
+        log.info(f"Fallback word tokenizer: vocab={actual_vs}")
+
+    def encode(self, text: str, add_special: bool = True) -> List[int]:
+        if self._hf is not None:
+            encoded = self._hf.encode(text)
+            ids = encoded.ids
+            if not add_special:
+                bos = self._vocab.get(self.BOS, 2)
+                eos = self._vocab.get(self.EOS, 3)
+                if ids and ids[0] == bos:
+                    ids = ids[1:]
+                if ids and ids[-1] == eos:
+                    ids = ids[:-1]
+            return ids
         tokens = []
-        
-        if add_special_tokens:
-            tokens.append(self.char2idx.get(self.BOS, 0))
-        
-        # Pre-process for reasoning markers
-        processed = text
-        
-        # Add reasoning markers for logical patterns
-        processed = self._add_reasoning_markers(processed)
-        
-        # Tokenize with BPE
-        words = re.findall(r'\w+|[^\w\s]', processed)
-        
-        for word in words:
-            if word in self.char2idx:
-                tokens.append(self.char2idx[word])
-            elif len(word) == 1 and word in self.vocab:
-                tokens.append(self.char2idx.get(word, self.char2idx[self.UNK]))
-            else:
-                # BPE-style tokenization
-                subword_tokens = self._bpe_tokenize(word)
-                tokens.extend(subword_tokens)
-        
-        if add_special_tokens:
-            tokens.append(self.char2idx.get(self.EOS, 0))
-        
+        if add_special:
+            tokens.append(self._vocab.get(self.BOS, 2))
+        for word in text.strip().split():
+            tid = self._vocab.get(word, self._vocab.get(self.UNK, 1))
+            tokens.append(tid)
+        if add_special:
+            tokens.append(self._vocab.get(self.EOS, 3))
         return tokens
-    
-    def _add_reasoning_markers(self, text: str) -> str:
-        """Add reasoning markers to text."""
-        # This is for pre-processing, mark logical patterns
-        patterns = [
-            (r'\bbecause\b', ' BECAUSE '),
-            (r'\btherefore\b', ' THEREFORE '),
-            (r'\bhence\b', ' HENCE '),
-            (r'\bthus\b', ' HENCE '),
-            (r'\bsince\b', ' SINCE '),
-            (r'\bif\b', ' IF '),
-            (r'\bthen\b', ' THEN '),
-            (r'\bhowever\b', ' HOWEVER '),
-            (r'\balthough\b', ' ALTHOUGH '),
-            (r'\bfirst\b', ' FIRST '),
-            (r'\bsecond\b', ' SECOND '),
-            (r'\bthird\b', ' THIRD '),
-            (r'\bfinally\b', ' FINALLY '),
-            (r'\bStep\s*(\d+)', r' STEP \1 '),
-            (r'\b(\d+)\.', r' \1 DOT '),
-        ]
-        
-        for pattern, replacement in patterns:
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-        
-        return text
-    
-    def _bpe_tokenize(self, word: str) -> List[int]:
-        """BPE-style tokenization."""
-        if not word:
-            return []
-        
-        # Start with characters
-        tokens = list(word)
-        
-        # Apply merges
-        for merge in self.merges:
-            merged = merge[0] + merge[1]
-            new_tokens = []
-            i = 0
-            while i < len(tokens):
-                if i < len(tokens) - 1 and tokens[i] + tokens[i+1] == merged:
-                    new_tokens.append(merged)
-                    i += 2
-                else:
-                    new_tokens.append(tokens[i])
-                    i += 1
-            tokens = new_tokens
-        
-        # Convert to IDs
-        result = []
-        for t in tokens:
-            if t in self.char2idx:
-                result.append(self.char2idx[t])
-            elif t.lower() in self.char2idx:
-                result.append(self.char2idx[t.lower()])
-            else:
-                result.append(self.char2idx.get(self.UNK, 1))
-        
-        return result
-    
+
     def decode(self, ids: List[int], skip_special: bool = True) -> str:
-        """Decode token IDs to text."""
-        chars = []
-        special_ids = {self.char2idx[t] for t in self.SPECIAL_TOKENS if t in self.char2idx}
-        
+        if self._hf is not None:
+            return self._hf.decode(ids, skip_special_tokens=skip_special)
+        special_ids = {self._vocab.get(t) for t in self.SPECIAL_TOKENS if t in self._vocab}
+        tokens = []
         for i in ids:
-            token = self.idx2char.get(i, "")
             if skip_special and i in special_ids:
                 continue
-            chars.append(token)
-        
-        return "".join(chars)
-    
-    def get_reasoning_mask(self, ids: List[int]) -> List[float]:
-        """Get loss weight mask for reasoning tokens."""
-        weights = []
-        special_ids = {self.char2idx.get(t, -1) for t in self.SPECIAL_TOKENS}
-        logic_ids = {
-            self.char2idx.get(t, -1) for t in [
-                self.THEREFORE, self.BECAUSE, self.IF, self.THEN,
-                self.SINCE, self.HENCE, self.AND, self.OR, self.NOT,
-                self.REASON_START, self.REASON_END, self.STEP, self.THOUGHT
-            ]
-        }
-        
-        for i in ids:
-            if i in special_ids:
-                weights.append(0.0)  # Don't train on special tokens
-            elif i in logic_ids:
-                weights.append(3.0)  # High weight for logical tokens
-            else:
-                weights.append(1.0)  # Normal weight
-        
-        return weights
-    
+            tokens.append(self._id2tok.get(i, ""))
+        return " ".join(tokens)
+
+    @property
+    def vocab_size_real(self) -> int:
+        if self._hf is not None:
+            return self._hf.get_vocab_size()
+        return len(self._vocab)
+
     def save(self, path: str) -> None:
-        """Save tokenizer to file."""
-        data = {
-            "char2idx": self.char2idx,
-            "idx2char": {str(k): v for k, v in self.idx2char.items()},
-            "vocab_size": self.vocab_size,
-            "merges": [list(m) for m in self.merges],
-            "special_token_ids": {t: i for t, i in self._special_token_ids.items()},
-        }
+        data: Dict = {"vocab_size": self.vocab_size, "use_hf": self._hf is not None}
+        if self._hf is not None:
+            self._hf.save(str(Path(path).with_suffix(".json")))
+            data["hf_path"] = str(Path(path).with_suffix(".json"))
+        else:
+            data["vocab"] = self._vocab
+            data["id2tok"] = {str(k): v for k, v in self._id2tok.items()}
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-    
+            json.dump(data, f, indent=2)
+
     @classmethod
     def load(cls, path: str) -> "AdvancedTokenizer":
-        """Load tokenizer from file."""
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        
-        t = cls()
-        t.char2idx = data["char2idx"]
-        t.idx2char = {int(k): v for k, v in data["idx2char"].items()}
-        t.vocab_size = data["vocab_size"]
-        t.merges = [tuple(m) for m in data.get("merges", [])]
-        t._special_token_ids = data.get("special_token_ids", {})
-        
+        t = cls(vocab_size=data.get("vocab_size", 8192))
+        if data.get("use_hf") and HF_AVAILABLE:
+            hf_path = data.get("hf_path", "")
+            if hf_path and Path(hf_path).exists():
+                t._hf = HFTokenizer.from_file(hf_path)
+            else:
+                local_hf = Path(path).with_suffix(".json")
+                if local_hf.exists():
+                    t._hf = HFTokenizer.from_file(str(local_hf))
+            if t._hf is not None:
+                t._vocab = t._hf.get_vocab()
+                t._id2tok = {v: k for k, v in t._vocab.items()}
+                t._use_hf = True
+                return t
+        t._vocab = data.get("vocab", {})
+        t._id2tok = {int(k): v for k, v in data.get("id2tok", {}).items()}
+        t._use_hf = False
         return t
 
 
-class ReasoningTokenizer(AdvancedTokenizer):
-    """Extended tokenizer with focus on reasoning patterns."""
-    
-    # Additional reasoning tokens
-    ANALYSIS   = "<ANALYSIS>"
-    HYPOTHESIS = "<HYPOTHESIS>"
-    EVIDENCE   = "<EVIDENCE>"
-    CONCLUSION = "<CONCLUSION>"
-    REFLECTION = "<REFLECTION>"
-    
-    def __init__(self, vocab_size: int = 16384, min_freq: int = 2):
-        super().__init__(vocab_size, min_freq)
-        self.reasoning_patterns = [
-            r"<REASON>|<REASON>",
-            r"because|since|therefore|hence|thus",
-            r"if.*then|when.*then",
-            r"step\s*\d+",
-            r"first|second|third|finally",
-            r"however|although|but|yet",
-            r"think|believe|consider|analyze",
-            r"evidence shows|research suggests",
-            r"in conclusion|to summarize",
-            r"this means|this implies|this suggests",
-        ]
-        self.reasoning_regex = re.compile('|'.join(self.reasoning_patterns), re.IGNORECASE)
+def train_tokenizer(texts: List[str], vocab_size: int = 8192, save_path: Optional[str] = None) -> AdvancedTokenizer:
+    tok = AdvancedTokenizer(vocab_size=vocab_size)
+    tok.build(texts)
+    if save_path:
+        tok.save(save_path)
+    return tok

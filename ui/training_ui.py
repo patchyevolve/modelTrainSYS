@@ -1,6 +1,6 @@
 """
 Training System Visual Interface
-Hierarchical Mamba + Transformer ML System
+Decoder-only Transformer (GQA, YaRN RoPE, BPE Tokenizer)
 Drag-and-drop data loading, live training metrics, model manager
 """
 
@@ -8,30 +8,25 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 import json
-import math
 import os
-import time
-import random
+import math
 from pathlib import Path
 from datetime import datetime
 
-from ui.theme import (
+from .theme import (
     BG_DARK, BG_PANEL, BG_CARD, BG_INPUT, ACCENT, ACCENT_HOV, ACCENT2,
     BORDER, TEXT_PRI, TEXT_SEC, TEXT_WARN, TEXT_ERR, TEXT_OK, DRAG_OVER,
     SUPPORTED_EXTS, ALL_EXTS, styled_frame, label, section_title,
     accent_btn, ghost_btn, separator, fmt_size, setup_ttk_styles
 )
-from ui.training_controller import MODEL_REGISTRY, TrainingController
-from ui.components import DropZone, DataPanel, LineChart
-from ui.inference_window import InferenceWindow
-from ui.health_window import HealthPanel
+from .training_controller import TrainingController
+from .components import DropZone, DataPanel, LineChart
+from .inference_window import InferenceWindow
+from .health_window import HealthPanel
 from training.unified_trainer import (
-    UnifiedTrainer, TrainConfig, ModelType, TrainingRuntimeError
+    UnifiedTrainer, TrainConfig, TrainingRuntimeError
 )
-try:
-    from data.hf_dataset_loader import DATASETS_AVAILABLE as HF_DATASETS_AVAILABLE
-except Exception:
-    HF_DATASETS_AVAILABLE = False
+HF_DATASETS_AVAILABLE = False
 
 # ─── Training Config + Status Panel (center) ─────────────────────────────────
 
@@ -64,7 +59,6 @@ class TrainingPanel(tk.Frame):
             anchor="w", pady=(8, 6), padx=8)
 
         params = [
-            ("Model Type",    list(MODEL_REGISTRY.keys())),
             ("Optimizer",     ["Adam", "AdamW", "SGD"]),
             ("Scheduler",     ["CosineAnnealing", "StepLR", "None"]),
         ]
@@ -79,14 +73,6 @@ class TrainingPanel(tk.Frame):
             cb.set(opts[0])
             cb.pack(side="left", padx=4)
             self.combos[lbl_text] = cb
-            # Info button for Model Type
-            if lbl_text == "Model Type":
-                info_btn = tk.Button(row, text="?", bg=ACCENT2, fg=TEXT_PRI,
-                                     relief="flat", cursor="hand2",
-                                     font=("Segoe UI", 8, "bold"), width=2,
-                                     command=self._show_model_info)
-                info_btn.pack(side="left", padx=2)
-                cb.bind("<<ComboboxSelected>>", lambda e: self._update_model_desc())
 
         spinners = [
             ("Epochs",      "epochs",    20,   1,   500),
@@ -118,31 +104,7 @@ class TrainingPanel(tk.Frame):
                  insertbackground=TEXT_PRI, relief="flat",
                  font=("Segoe UI", 9), width=10).pack(side="left", padx=4)
 
-        # Reflector toggle
-        ref_row = tk.Frame(cfg_frame, bg=BG_CARD)
-        ref_row.pack(fill="x", padx=8, pady=1)
-        tk.Label(ref_row, text="Reflector", fg=TEXT_SEC, bg=BG_CARD,
-                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
-        self.reflector_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(ref_row, variable=self.reflector_var, bg=BG_CARD,
-                       fg=TEXT_PRI, selectcolor=BG_INPUT,
-                       activebackground=BG_CARD).pack(side="left")
-        tk.Label(ref_row, text="Enable auto-correction", fg=TEXT_SEC,
-                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
-
-        # Reasoning Mode toggle (new)
-        reason_row = tk.Frame(cfg_frame, bg=BG_CARD)
-        reason_row.pack(fill="x", padx=8, pady=(1, 4))
-        tk.Label(reason_row, text="Reasoning Mode", fg=TEXT_SEC, bg=BG_CARD,
-                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
-        self.reasoning_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(reason_row, variable=self.reasoning_var, bg=BG_CARD,
-                       fg=TEXT_PRI, selectcolor=BG_INPUT,
-                       activebackground=BG_CARD).pack(side="left")
-        tk.Label(reason_row, text="Train on logic only (Text Gen)", fg=TEXT_SEC,
-                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
-
-        # Seq Len (context length) - critical for text generation
+        # Seq Len (context length)
         seq_row = tk.Frame(cfg_frame, bg=BG_CARD)
         seq_row.pack(fill="x", padx=8, pady=(1, 4))
         tk.Label(seq_row, text="Seq Length", fg=TEXT_SEC, bg=BG_CARD,
@@ -151,85 +113,106 @@ class TrainingPanel(tk.Frame):
         tk.Entry(seq_row, textvariable=self.seq_len_var, bg=BG_INPUT, fg=TEXT_PRI,
                  insertbackground=TEXT_PRI, relief="flat",
                  font=("Segoe UI", 9), width=6).pack(side="left", padx=4)
-        tk.Label(seq_row, text=" chars context (0=auto)", fg=TEXT_SEC,
+        tk.Label(seq_row, text=" tokens context", fg=TEXT_SEC,
                  bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
 
-        # Dataset Name (for HuggingFace datasets)
-        ds_row = tk.Frame(cfg_frame, bg=BG_CARD)
-        ds_row.pack(fill="x", padx=8, pady=(1, 4))
-        tk.Label(ds_row, text="HF Dataset", fg=TEXT_SEC, bg=BG_CARD,
+        # Advanced settings
+        adv_frame = tk.Frame(cfg_frame, bg=BG_CARD)
+        adv_frame.pack(fill="x", padx=8, pady=(4, 2))
+        tk.Label(adv_frame, text="Max RAM (MB)", fg=TEXT_SEC, bg=BG_CARD,
                  font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
-        self.dataset_var = tk.StringVar(value="")
-        tk.Entry(ds_row, textvariable=self.dataset_var, bg=BG_INPUT, fg=TEXT_PRI,
-                 insertbackground=TEXT_PRI, relief="flat",
-                 font=("Segoe UI", 9), width=24).pack(side="left", padx=4)
-        tk.Label(
-            ds_row,
-            text=" (Text Generation only — e.g. wikitext, user/dataset)",
-            fg=TEXT_SEC,
-            bg=BG_CARD,
-            font=("Segoe UI", 8),
-        ).pack(side="left")
+        self.max_ram_var = tk.StringVar(value="0")
+        tk.Spinbox(adv_frame, from_=0, to=65536, increment=512,
+                   textvariable=self.max_ram_var, bg=BG_INPUT, fg=TEXT_PRI,
+                   font=("Segoe UI", 9), width=7, buttonbackground=BG_INPUT).pack(side="left", padx=4)
+        tk.Label(adv_frame, text="CPU threads", fg=TEXT_SEC, bg=BG_CARD,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(10, 2))
+        self.cpu_threads_var = tk.StringVar(value="0")
+        tk.Spinbox(adv_frame, from_=0, to=64, increment=1,
+                   textvariable=self.cpu_threads_var, bg=BG_INPUT, fg=TEXT_PRI,
+                   font=("Segoe UI", 9), width=4, buttonbackground=BG_INPUT).pack(side="left", padx=2)
 
-        # Reasoning Settings (for Text Generation)
-        tk.Label(cfg_frame, text="── Text/Reasoning Settings ──", fg=ACCENT2, bg=BG_CARD,
-                 font=("Segoe UI", 8, "bold")).pack(fill="x", padx=8, pady=(8, 4))
-        
-        # Reasoning Weight
-        reason_weight_row = tk.Frame(cfg_frame, bg=BG_CARD)
-        reason_weight_row.pack(fill="x", padx=8, pady=(1, 4))
-        tk.Label(reason_weight_row, text="Reasoning Weight", fg=TEXT_SEC, bg=BG_CARD,
+        adv_row2 = tk.Frame(cfg_frame, bg=BG_CARD)
+        adv_row2.pack(fill="x", padx=8, pady=(1, 4))
+        tk.Label(adv_row2, text="Data workers", fg=TEXT_SEC, bg=BG_CARD,
                  font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
-        self.reasoning_weight_var = tk.StringVar(value="3.0")
-        tk.Entry(reason_weight_row, textvariable=self.reasoning_weight_var, bg=BG_INPUT, fg=TEXT_PRI,
-                 insertbackground=TEXT_PRI, relief="flat",
-                 font=("Segoe UI", 9), width=6).pack(side="left", padx=4)
-        tk.Label(reason_weight_row, text=" (boost logic tokens)", fg=TEXT_SEC,
-                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
-        
-        # Logic Weight
-        logic_weight_row = tk.Frame(cfg_frame, bg=BG_CARD)
-        logic_weight_row.pack(fill="x", padx=8, pady=(1, 4))
-        tk.Label(logic_weight_row, text="Logic Weight", fg=TEXT_SEC, bg=BG_CARD,
-                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
-        self.logic_weight_var = tk.StringVar(value="2.5")
-        tk.Entry(logic_weight_row, textvariable=self.logic_weight_var, bg=BG_INPUT, fg=TEXT_PRI,
-                 insertbackground=TEXT_PRI, relief="flat",
-                 font=("Segoe UI", 9), width=6).pack(side="left", padx=4)
-        tk.Label(logic_weight_row, text=" (connectors)", fg=TEXT_SEC,
-                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
-        
-        # Curriculum Learning toggle
-        curriculum_row = tk.Frame(cfg_frame, bg=BG_CARD)
-        curriculum_row.pack(fill="x", padx=8, pady=(1, 4))
-        tk.Label(curriculum_row, text="Curriculum", fg=TEXT_SEC, bg=BG_CARD,
-                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
-        self.curriculum_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(curriculum_row, variable=self.curriculum_var, bg=BG_CARD,
+        self.num_workers_var = tk.StringVar(value="0")
+        tk.Spinbox(adv_row2, from_=0, to=16, increment=1,
+                   textvariable=self.num_workers_var, bg=BG_INPUT, fg=TEXT_PRI,
+                   font=("Segoe UI", 9), width=4, buttonbackground=BG_INPUT).pack(side="left", padx=4)
+        self.subprocess_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(adv_row2, variable=self.subprocess_var, bg=BG_CARD,
                        fg=TEXT_PRI, selectcolor=BG_INPUT,
-                       activebackground=BG_CARD).pack(side="left")
-        tk.Label(curriculum_row, text="(simple→complex)", fg=TEXT_SEC,
-                 bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
-        
-        # Focal Loss toggle
-        focal_row = tk.Frame(cfg_frame, bg=BG_CARD)
-        focal_row.pack(fill="x", padx=8, pady=(1, 4))
-        tk.Label(focal_row, text="Focal Loss", fg=TEXT_SEC, bg=BG_CARD,
-                 font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
-        self.focal_loss_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(focal_row, variable=self.focal_loss_var, bg=BG_CARD,
-                       fg=TEXT_PRI, selectcolor=BG_INPUT,
-                       activebackground=BG_CARD).pack(side="left")
-        tk.Label(focal_row, text="(hard example mining)", fg=TEXT_SEC,
+                       activebackground=BG_CARD).pack(side="left", padx=(4, 2))
+        tk.Label(adv_row2, text="Subprocess (no UI lag)", fg=TEXT_SEC,
                  bg=BG_CARD, font=("Segoe UI", 8)).pack(side="left")
 
-        # Model description box
-        self.model_desc_lbl = tk.Label(
-            cfg_frame, text="", fg=TEXT_SEC, bg=BG_CARD,
-            font=("Segoe UI", 8), justify="left", anchor="w",
-            wraplength=340, padx=8, pady=4)
-        self.model_desc_lbl.pack(fill="x", padx=8, pady=(0, 8))
-        self._update_model_desc()
+        tk.Label(cfg_frame, text="Decoder-only Transformer · GQA · YaRN RoPE · Any text file",
+                 fg=TEXT_SEC, bg=BG_CARD, font=("Segoe UI", 8),
+                 wraplength=340, padx=8, pady=4, anchor="w", justify="left").pack(fill="x", padx=8, pady=(0, 4))
+
+        # ── Expandable Template section ──
+        tmpl_sec = tk.Frame(cfg_frame, bg=BG_CARD)
+        tmpl_sec.pack(fill="x", padx=0, pady=(0, 8))
+        self._tmpl_expanded = tk.BooleanVar(value=False)
+        tmpl_header = tk.Frame(tmpl_sec, bg=BG_CARD)
+        tmpl_header.pack(fill="x", padx=8)
+        tmpl_toggle = tk.Label(tmpl_header, text="▶  TEMPLATE", fg=ACCENT,
+                               bg=BG_CARD, font=("Segoe UI", 9, "bold"),
+                               cursor="hand2")
+        tmpl_toggle.pack(side="left")
+        tmpl_body = tk.Frame(tmpl_sec, bg=BG_CARD)
+        def _toggle_tmpl(_=None):
+            if self._tmpl_expanded.get():
+                tmpl_body.pack_forget()
+                tmpl_toggle.config(text="▶  TEMPLATE")
+                self._tmpl_expanded.set(False)
+            else:
+                tmpl_body.pack(fill="x", padx=16, pady=(4, 4))
+                tmpl_toggle.config(text="▼  TEMPLATE")
+                self._tmpl_expanded.set(True)
+        tmpl_toggle.bind("<Button-1>", _toggle_tmpl)
+
+        self._refresh_templates()
+        tmpl_row = tk.Frame(tmpl_body, bg=BG_CARD)
+        tmpl_row.pack(fill="x", pady=2)
+        tk.Label(tmpl_row, text="Template", fg=TEXT_SEC, bg=BG_CARD,
+                 font=("Segoe UI", 9), width=12, anchor="w").pack(side="left")
+        self.tmpl_combo = ttk.Combobox(tmpl_row, values=self._template_list,
+                                       state="readonly", font=("Segoe UI", 9), width=22)
+        self.tmpl_combo.set("step_by_step")
+        self.tmpl_combo.pack(side="left", padx=4)
+
+        # Field mapping: key → value pairs for template segment fields
+        mapping_row = tk.Frame(tmpl_body, bg=BG_CARD)
+        mapping_row.pack(fill="x", pady=2)
+        tk.Label(mapping_row, text="Field map", fg=TEXT_SEC, bg=BG_CARD,
+                 font=("Segoe UI", 9), width=12, anchor="w").pack(side="left")
+        self.tmpl_fields_var = tk.StringVar(value="")
+        tk.Entry(mapping_row, textvariable=self.tmpl_fields_var, bg=BG_INPUT, fg=TEXT_PRI,
+                 insertbackground=TEXT_PRI, relief="flat",
+                 font=("Segoe UI", 9), width=22).pack(side="left", padx=4)
+        tk.Label(mapping_row, text="key=val,key=val", fg=TEXT_SEC, bg=BG_CARD,
+                 font=("Segoe UI", 8)).pack(side="left")
+
+    def _parse_template_fields(self):
+        raw = self.tmpl_fields_var.get().strip() if hasattr(self, 'tmpl_fields_var') else ""
+        if not raw:
+            return None
+        fields = {}
+        for pair in raw.split(","):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                fields[k.strip()] = v.strip()
+        return fields or None
+
+    def _refresh_templates(self):
+        try:
+            from data.templates import init_templates, list_templates
+            init_templates("templates")
+            self._template_list = list_templates()
+        except Exception:
+            self._template_list = ["step_by_step", "qa", "analysis", "chat", "raw"]
 
         # ── Action buttons ──
         btn_row = tk.Frame(self, bg=BG_PANEL)
@@ -251,10 +234,8 @@ class TrainingPanel(tk.Frame):
         cards = [
             ("Epoch",    "epoch",    "—"),
             ("Loss",     "loss",     "—"),
-            ("Accuracy", "acc",      "—"),
             ("LR",       "lr",       "—"),
             ("ETA",      "eta",      "—"),
-            ("Reflector","refl",     "—"),
         ]
         for i, (title, key, init) in enumerate(cards):
             card = styled_frame(status_row, bg=BG_CARD)
@@ -312,32 +293,6 @@ class TrainingPanel(tk.Frame):
         self.log_text.tag_config("info", foreground=ACCENT2)
 
     # ── Model info helpers ────────────────────────────────────────────────────
-    def _update_model_desc(self, _=None):
-        mtype = self.combos["Model Type"].get()
-        info  = MODEL_REGISTRY.get(mtype, {})
-        desc  = info.get("desc", "")
-        # Show first line only in the inline label
-        first_line = desc.split("\n")[0] if desc else ""
-        self.model_desc_lbl.config(text=f"ℹ  {first_line}")
-
-    def _show_model_info(self):
-        mtype = self.combos["Model Type"].get()
-        info  = MODEL_REGISTRY.get(mtype, {})
-        desc  = info.get("desc", "No description available.")
-        win = tk.Toplevel(self)
-        win.title(f"Model: {mtype}")
-        win.configure(bg=BG_DARK)
-        win.geometry("420x220")
-        win.resizable(False, False)
-        tk.Label(win, text=mtype, fg=TEXT_PRI, bg=BG_DARK,
-                 font=("Segoe UI", 12, "bold")).pack(pady=(16, 8), padx=20, anchor="w")
-        tk.Label(win, text=desc, fg=TEXT_SEC, bg=BG_DARK,
-                 font=("Segoe UI", 9), justify="left", wraplength=380,
-                 anchor="w").pack(padx=20, anchor="w")
-        tk.Button(win, text="Close", command=win.destroy,
-                  bg=BG_INPUT, fg=TEXT_SEC, relief="flat",
-                  font=("Segoe UI", 9), pady=4, width=10).pack(pady=16)
-
     # ── Log helpers ──────────────────────────────────────────────────────────
     def _log(self, msg, tag=""):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -365,7 +320,7 @@ class TrainingPanel(tk.Frame):
     def _get_config(self):
         seq_len_val = int(self.seq_len_var.get())
         return {
-            "model_type":     self.combos["Model Type"].get(),
+            "model_type":     "text_generation",
             "optimizer":      self.combos["Optimizer"].get(),
             "scheduler":      self.combos["Scheduler"].get(),
             "epochs":         int(self.spins["epochs"].get()),
@@ -374,60 +329,26 @@ class TrainingPanel(tk.Frame):
             "num_layers":     int(self.spins["layers"].get()),
             "num_heads":      int(self.spins["heads"].get()),
             "lr":             float(self.lr_var.get()),
-            "seq_len":        seq_len_val if seq_len_val > 0 else 0,
-            "reflector":      self.reflector_var.get(),
-            "reasoning_only": self.reasoning_var.get(),
-            "dataset_name":   self.dataset_var.get().strip(),
-            "reasoning_weight": float(self.reasoning_weight_var.get()),
-            "logic_weight":   float(self.logic_weight_var.get()),
-            "curriculum":      self.curriculum_var.get(),
-            "focal_loss":     self.focal_loss_var.get(),
+            "seq_len":        max(seq_len_val, 8),
+            "max_ram_mb":     int(self.max_ram_var.get()),
+            "cpu_threads":    int(self.cpu_threads_var.get()),
+            "num_workers":    int(self.num_workers_var.get()),
+            "use_subprocess": self.subprocess_var.get(),
+            "prompt_ratio":   0.3,
+            "template_name":  self.tmpl_combo.get() if hasattr(self, 'tmpl_combo') else "step_by_step",
+            "template_fields": self._parse_template_fields(),
+            "resume_path":    None,
         }
 
     # ── Training simulation / real run ───────────────────────────────────────
     def _start(self):
         files = self.get_files()
         cfg = self._get_config()
-        task = MODEL_REGISTRY.get(cfg["model_type"], {}).get("task", "binary_classification")
-        dataset_name = (cfg.get("dataset_name") or "").strip()
-        is_lm = task == "language_model"
 
-        # HF Hub is only loaded for Text Generation; other model types need local files.
-        if dataset_name and not is_lm and not files:
-            messagebox.showwarning(
-                "HF Dataset — wrong model type",
-                "You entered an HF dataset name, but \"Hierarchical Mamba\", "
-                "\"Transformer\", etc. train on local files (.csv, .txt, …), not "
-                "the Hugging Face field.\n\n"
-                "To train on a Hugging Face dataset, set Model Type to "
-                "\"Text Generation\", then use the HF name (or add text files).\n\n"
-                "To keep this model type, add files in the data list and you can "
-                "clear the HF field.",
-            )
-            return
-
-        # If they typed an HF name but `datasets` isn't importable, explain clearly (don't say "add files").
-        if is_lm and dataset_name and not HF_DATASETS_AVAILABLE:
-            messagebox.showwarning(
-                "Hugging Face `datasets` not available",
-                "You entered an HF dataset name, but the Hugging Face stack failed to "
-                "load in this Python (missing package or incompatible pyarrow).\n\n"
-                "Try, using the same Python as this app:\n"
-                "  pip install -U datasets pyarrow\n\n"
-                "If errors persist, upgrade pyarrow to match your Python version:\n"
-                "  pip install -U \"pyarrow>=14\"",
-            )
-            return
-
-        # LM: local files OR Hub name (Hub requires HF_DATASETS_AVAILABLE, checked above).
-        data_ok = bool(files) or (is_lm and bool(dataset_name) and HF_DATASETS_AVAILABLE)
-        if not data_ok:
+        if not files:
             messagebox.showwarning(
                 "No Data",
-                "For Text Generation: add training files (.txt, .csv, …) or enter an HF "
-                "dataset name (e.g. wikitext, username/dataset) and install "
-                "`pip install datasets`.\n"
-                "Other model types require files in the list.",
+                "Add training files (.txt, .csv, .json, .jsonl) via the Data panel first."
             )
             return
         ok, reason = self.controller.validate_runtime_config(cfg)
@@ -436,11 +357,28 @@ class TrainingPanel(tk.Frame):
             self._log(f"[TRN-CONFIG-001] {reason}", "warn")
             return
         cfg = self._get_config()
+        cfg["resume_path"] = None
+        self._begin_training(cfg, files)
+
+    def _start_with_resume(self, resume_path, new_files, append_mode):
+        cfg = self._get_config()
+        files = self.get_files() if append_mode else []
+        files = list(set(files + list(new_files)))
+        cfg["resume_path"] = resume_path
+        cfg["epochs"] = max(cfg["epochs"], 1)
+        if not files:
+            messagebox.showwarning("No Data", "No training files available.")
+            return
+        self._log(f"Resuming from {Path(resume_path).name} | "
+                  f"{len(files)} files ({'append' if append_mode else 'replace'})", "info")
+        self._begin_training(cfg, files)
+
+    def _begin_training(self, cfg, files):
         self._stop_flag.clear()
         self.running = True
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
-        self._log(f"Starting training — {cfg['model_type']} | "
+        self._log(f"Starting training — {cfg['template_name']} | "
                   f"{len(files)} files | {cfg['epochs']} epochs", "info")
         self._thread = threading.Thread(target=self._run_training,
                                         args=(cfg, files), daemon=True)
@@ -451,28 +389,35 @@ class TrainingPanel(tk.Frame):
         self._log("Stop requested…", "warn")
 
     def _run_training(self, cfg, files):
-        """Run training using UnifiedTrainer - delegates all logic to training module."""
-        model_type = self.controller.get_model_type_enum(cfg["model_type"])
-        
-        # Build training config
         train_config = TrainConfig(
-            model_type=model_type,
             epochs=cfg["epochs"],
             batch_size=cfg["batch_size"],
             lr=cfg["lr"],
             hidden_dim=cfg["hidden_dim"],
             num_layers=cfg["num_layers"],
             num_heads=cfg["num_heads"],
+            num_kv_heads=cfg.get("num_kv_heads"),
             seq_len=cfg.get("seq_len", 128) or 128,
             optimizer=cfg["optimizer"],
             scheduler=cfg["scheduler"],
-            use_reflector=cfg.get("reflector", False),
-            reasoning_weight=cfg.get("reasoning_weight", 1.0),
-            logic_weight=cfg.get("logic_weight", 2.5),
-            curriculum=cfg.get("curriculum", False),
-            focal_loss=cfg.get("focal_loss", False),
-            dataset_name=cfg.get("dataset_name", ""),
-            reasoning_only=cfg.get("reasoning_only", False),
+            use_amp=cfg.get("use_amp", True),
+            grad_accum_steps=cfg.get("grad_accum_steps", 1),
+            max_grad_norm=cfg.get("max_grad_norm", 1.0),
+            use_gradient_checkpointing=cfg.get("use_gradient_checkpointing", False),
+            ema_decay=cfg.get("ema_decay", 0.0),
+            weight_decay=cfg.get("weight_decay", 0.01),
+            warmup_steps=cfg.get("warmup_steps", 100),
+            max_ram_mb=cfg.get("max_ram_mb", 0),
+            num_workers=cfg.get("num_workers", 0),
+            pin_memory=cfg.get("pin_memory", False),
+            cpu_threads=cfg.get("cpu_threads", 0),
+            use_subprocess=cfg.get("use_subprocess", False),
+            prompt_ratio=cfg.get("prompt_ratio", 0.3),
+            template_name=cfg.get("template_name", "step_by_step"),
+            template_fields=cfg.get("template_fields"),
+            resume_path=cfg.get("resume_path"),
+            resume_freeze_layers=cfg.get("resume_freeze_layers", 0),
+            resume_freeze_embeddings=cfg.get("resume_freeze_embeddings", False),
         )
         
         # Create trainer
@@ -490,10 +435,12 @@ class TrainingPanel(tk.Frame):
             if result:
                 final_stats = {
                     "loss": self.stat_vars["loss"].get(),
-                    "acc": self.stat_vars["acc"].get()
                 }
                 checkpoint_name = self.controller.save_checkpoint(
-                    cfg, result.model, result.best_state, result.info, final_stats
+                    cfg, result.model, result.best_state, result.info, final_stats,
+                    tokenizer=result.tokenizer,
+                    files_used=getattr(trainer, '_saved_files', []) + files,
+                    resume_count=getattr(trainer, '_resume_count', 0),
                 )
                 self._ui(self._log, f"Checkpoint saved → {checkpoint_name}.pt", "ok")
                 if self.on_checkpoint_saved:
@@ -508,19 +455,16 @@ class TrainingPanel(tk.Frame):
             self._ui(self._finish_training)
 
     def _on_training_progress(self, epoch=None, epochs=None, loss=None, accuracy=None,
-                             lr=None, eta=None, stage="", pct=None):
-        """Handle training progress updates."""
+                             lr=None, eta=None, stage="", pct=None, ram_info=""):
         if epoch is not None and epochs is not None:
             self._ui(self._update_stats,
                     epoch, epochs, loss or 0,
-                    accuracy or 0, lr or 0, eta or "", 0.0, pct or 0)
-    
-    def _update_stats(self, epoch, epochs, loss, accuracy, lr, eta, val_loss, pct):
-        """Update UI stats after training step."""
+                    accuracy or 0, lr or 0, eta or "", 0.0, pct or 0, ram_info or "")
+
+    def _update_stats(self, epoch, epochs, loss, accuracy, lr, eta, val_loss, pct, ram_info=""):
         if hasattr(self, "progress_var"):
             try:
                 p = float(pct or 0)
-                # Trainer passes 0–100; tolerate accidental 0–1
                 if p <= 1.0:
                     p *= 100.0
                 self.progress_var.set(min(100.0, max(0.0, p)))
@@ -533,21 +477,16 @@ class TrainingPanel(tk.Frame):
             except (TypeError, ValueError):
                 self.stat_vars["loss"].set(str(loss))
             try:
-                self.stat_vars["acc"].set(f"{float(accuracy):.2f}%")
-            except (TypeError, ValueError):
-                self.stat_vars["acc"].set(str(accuracy))
-            try:
                 self.stat_vars["lr"].set(f"{float(lr):.6g}")
             except (TypeError, ValueError):
                 self.stat_vars["lr"].set(str(lr))
             self.stat_vars["eta"].set(str(eta) if eta else "—")
         if hasattr(self, 'prog_lbl'):
             eta_str = f" · ETA {eta}" if eta else ""
-            self.prog_lbl.config(text=f"Epoch {epoch}/{epochs}{eta_str}")
+            ram_str = f" · {ram_info}" if ram_info else ""
+            self.prog_lbl.config(text=f"Epoch {epoch}/{epochs}{eta_str}{ram_str}")
         if hasattr(self, 'loss_chart') and loss:
             self.loss_chart.push(loss)
-        if hasattr(self, 'acc_chart') and accuracy:
-            self.acc_chart.push(accuracy)
     
     def _on_training_log(self, msg, level="info"):
         """Handle training log messages."""
@@ -561,10 +500,11 @@ class TrainingPanel(tk.Frame):
 # ─── Model Manager Panel (right column) ──────────────────────────────────────
 
 class ModelManagerPanel(tk.Frame):
-    def __init__(self, parent, **kw):
+    def __init__(self, parent, resume_callback=None, **kw):
         super().__init__(parent, bg=BG_PANEL, **kw)
         self.models = []
         self.selected = None
+        self.resume_callback = resume_callback
         self._build()
         self._refresh()
 
@@ -630,6 +570,8 @@ class ModelManagerPanel(tk.Frame):
         act_row.pack(fill="x", padx=12, pady=(0, 12))
         accent_btn(act_row, "▶ Run Inference", self._run_inference_ui,
                    color=ACCENT2, width=16).pack(side="left", padx=(0, 6))
+        accent_btn(act_row, "↻ Resume Training", self._resume_training,
+                   color="#2563eb", width=16).pack(side="left", padx=(0, 6))
         ghost_btn(act_row, "Export", self._export_model, width=10).pack(
             side="left", padx=(0, 6))
         ghost_btn(act_row, "Delete", self._delete_model, width=10).pack(
@@ -685,15 +627,12 @@ class ModelManagerPanel(tk.Frame):
             f"Name:        {m.get('name','—')}",
             f"Type:        {m.get('model_type','—')}",
             f"Status:      {m.get('status','—')}",
-            f"Accuracy:    {m.get('accuracy','—')}",
             f"Loss:        {m.get('loss','—')}",
             f"Epochs:      {cfg.get('epochs','—')}",
             f"Hidden Dim:  {cfg.get('hidden_dim','—')}",
             f"Layers:      {cfg.get('num_layers','—')}",
-            f"Feat Dim:    {m.get('feature_dim','—')}",
-            f"Classes:     {m.get('num_classes','—')}",
-            f"Train Rows:  {m.get('train_rows','—')}",
-            f"Reflector:   {cfg.get('reflector','—')}",
+            f"Heads:       {cfg.get('num_heads','—')}",
+            f"Seq Len:     {cfg.get('seq_len','—')}",
             f"Weights:     {Path(wf).name if wf != '—' else '—'}",
             f"Created:     {m.get('created','—')[:19]}",
         ]
@@ -713,6 +652,54 @@ class ModelManagerPanel(tk.Frame):
                 "Re-train the model to generate a .pt file.")
             return
         InferenceWindow(self, self.selected)
+
+    def _resume_training(self):
+        if not self.selected:
+            messagebox.showinfo("No Selection", "Select a model first.")
+            return
+        wf = self.selected.get("weights_file")
+        if not wf or not Path(wf).exists():
+            messagebox.showwarning("No Weights",
+                f"Weights file not found:\n{wf}")
+            return
+
+        # Pick new data files to train on
+        paths = filedialog.askopenfilenames(
+            title="Select additional training data",
+            filetypes=[("Text/Data", "*.txt *.csv *.json *.jsonl")])
+        if not paths:
+            return
+
+        # Radio dialog for Append vs Replace
+        d = tk.Toplevel(self)
+        d.title("Resume Mode")
+        d.geometry("320x180")
+        d.configure(bg=BG_CARD)
+        d.transient(self)
+        d.grab_set()
+        mode_var = tk.StringVar(value="append")
+        tk.Label(d, text="Data mode for resumed training:", fg=TEXT_PRI,
+                 bg=BG_CARD, font=("Segoe UI", 10)).pack(pady=(16, 8))
+        tk.Radiobutton(d, text="Append — train on old + new data",
+                       variable=mode_var, value="append",
+                       bg=BG_CARD, fg=TEXT_PRI, selectcolor=BG_INPUT,
+                       font=("Segoe UI", 9)).pack(anchor="w", padx=32, pady=2)
+        tk.Radiobutton(d, text="Replace — train on only new data",
+                       variable=mode_var, value="replace",
+                       bg=BG_CARD, fg=TEXT_PRI, selectcolor=BG_INPUT,
+                       font=("Segoe UI", 9)).pack(anchor="w", padx=32, pady=2)
+        btn_row = tk.Frame(d, bg=BG_CARD)
+        btn_row.pack(fill="x", padx=32, pady=(12, 0))
+        def _confirm():
+            d.destroy()
+            if self.resume_callback:
+                self.resume_callback(wf, list(paths), mode_var.get() == "append")
+        tk.Button(btn_row, text="Start Resume", command=_confirm,
+                  bg=ACCENT, fg=TEXT_PRI, relief="flat",
+                  font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        tk.Button(btn_row, text="Cancel", command=d.destroy,
+                  bg="#444", fg=TEXT_PRI, relief="flat",
+                  font=("Segoe UI", 9)).pack(side="left")
 
     def _export_model(self):
         if not self.selected:
@@ -745,7 +732,7 @@ class TrainingApp(tk.Tk):
     def __init__(self, skip_init=False):
         if not skip_init:
             super().__init__()
-        self.title("ML Training System — Hierarchical Mamba + Transformer")
+        self.title("ML Training System — Decoder-Only Transformer (GQA · YaRN · BPE)")
         self.configure(bg=BG_DARK)
         self.geometry("1400x860")
         self.minsize(1100, 700)
@@ -783,7 +770,7 @@ class TrainingApp(tk.Tk):
                  fg=TEXT_PRI, bg=BG_PANEL,
                  font=("Segoe UI", 12, "bold")).pack(side="left", padx=16,
                                                       pady=12)
-        tk.Label(bar, text="Hierarchical Mamba + Transformer  |  Reflector Auto-Correction",
+        tk.Label(bar, text="Decoder-Only Transformer · GQA · YaRN RoPE · BPE Tokenizer",
                  fg=TEXT_SEC, bg=BG_PANEL,
                  font=("Segoe UI", 9)).pack(side="left")
 
@@ -791,8 +778,6 @@ class TrainingApp(tk.Tk):
         ghost_btn(bar, "Health Check",
                   lambda: HealthPanel(self), width=12).pack(side="right",
                                                              padx=8, pady=8)
-        ghost_btn(bar, "⚙ Auto-Upgrade",
-                  self._open_upgrade_window, width=14).pack(side="right", pady=8)
         ghost_btn(bar, "Open Models Dir",
                   self._open_models_dir, width=14).pack(side="right", pady=8)
 
@@ -820,7 +805,7 @@ class TrainingApp(tk.Tk):
         separator_v2.pack(side="left", fill="y")
 
         # Right: Model manager
-        self.model_panel = ModelManagerPanel(body)
+        self.model_panel = ModelManagerPanel(body, resume_callback=self._on_resume)
         self.model_panel.pack(side="left", fill="y", padx=(4, 0))
         self.model_panel.config(width=340)
         self.model_panel.pack_propagate(False)
@@ -828,20 +813,22 @@ class TrainingApp(tk.Tk):
         # Wire model panel refresh after training
         self.train_panel.on_checkpoint_saved = lambda: self.after(500, self.model_panel._refresh)
 
-    def _open_upgrade_window(self):
-        try:
-            from ui.upgrade_window import AutoUpgradeWindow
-            # Try to get upgrade system from start.py if available
-            upgrade_sys = getattr(self, "_upgrade_system", None)
-            AutoUpgradeWindow(self, upgrade_sys)
-        except Exception as e:
-            from tkinter import messagebox
-            messagebox.showerror("Upgrade Window Error", str(e))
+    def _on_resume(self, resume_path, new_files, append_mode):
+        """Handle resume training from ModelManagerPanel."""
+        if not self.train_panel.running:
+            self.train_panel._start_with_resume(resume_path, new_files, append_mode)
 
     def _open_models_dir(self):
         d = Path("trained_models")
         d.mkdir(exist_ok=True)
-        os.startfile(str(d.resolve()))
+        import subprocess, sys
+        p = str(d.resolve())
+        if sys.platform == "win32":
+            os.startfile(p)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", p])
+        else:
+            subprocess.run(["xdg-open", p])
 
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import ttk
 from pathlib import Path
-from ui.theme import (
+from .theme import (
     BG_DARK, BG_CARD, TEXT_PRI, TEXT_SEC, TEXT_OK, TEXT_ERR, TEXT_WARN, ACCENT2,
     styled_frame, ghost_btn
 )
@@ -10,41 +10,36 @@ class HealthPanel(tk.Toplevel):
     REQUIRED_STRUCTURE = [
         ("core/",                        "Core module directory"),
         ("core/__init__.py",             "Core module exports"),
-        ("core/architecture.py",         "Base classes and orchestrator"),
-        ("core/implementations.py",      "Feeders, encoder, decoder"),
-        ("core/mamba.py",               "Mamba block implementation"),
-        ("core/transformer.py",          "Transformer block implementation"),
-        ("core/text_model.py",           "Language model utilities"),
-        ("core/device_manager.py",       "GPU/CPU device management"),
+        ("core/implementations.py",      "LMHead, GenConfig, DecoderOnlyTransformer, HMTLanguageModel"),
+        ("core/transformer.py",          "RotaryEmbedding (YaRN), TransformerBlock (GQA, SwiGLU)"),
+        ("core/text_model.py",           "lm_val_loss, save_lm, load_lm"),
+        ("core/device_manager.py",       "GPU/CPU device selection, move_batch"),
         ("training/",                    "Training module directory"),
         ("training/__init__.py",         "Training module exports"),
-        ("training/trainer.py",          "Cybersecurity trainer"),
-        ("training/reflector_trainer.py","Reflector + integrated trainer"),
+        ("training/unified_trainer.py",  "UnifiedTrainer, TrainConfig, train_model"),
         ("data/",                        "Data module directory"),
         ("data/__init__.py",             "Data module exports"),
-        ("data/data_loader.py",          "CSV/NPY data loading"),
-        ("data/text_dataset.py",         "Text dataset for LM training"),
-        ("data/image_dataset.py",        "Image dataset loading"),
-        ("data/prefetch_loader.py",      "Async data prefetching"),
+        ("data/advanced_tokenizer.py",   "BPE tokenizer (HF / fallback)"),
+        ("data/text_dataset.py",         "TextLMDataset, build_text_loaders"),
+        ("data/chat_dataset.py",         "ChatDataset, ReasoningDataset, build_chat_loaders"),
         ("ui/",                          "UI module directory"),
         ("ui/__init__.py",               "UI module exports"),
-        ("ui/chat.py",                  "Chat interface"),
-        ("ui/training_ui.py",           "Training GUI"),
-        ("ui/upgrade_window.py",        "Auto-upgrade UI"),
-        ("utils/",                       "Utils module directory"),
-        ("utils/__init__.py",            "Utils module exports"),
-        ("utils/data_classifier.py",    "Universal data classifier"),
-        ("utils/inference.py",          "Inference engine"),
-        ("utils/project_context.py",    "Project context analysis"),
-        ("utils/smart_upgrade.py",      "Smart upgrade system"),
-        ("utils/auto_upgrade.py",       "Auto-upgrade system"),
-        ("README.md",                    "Documentation"),
+        ("ui/training_ui.py",            "Tkinter training GUI"),
+        ("ui/training_controller.py",    "TrainingController, save_checkpoint"),
+        ("ui/health_window.py",          "Health check panel"),
+        ("ui/model_chat.py",            "Terminal chat with GenConfig controls"),
+        ("ui/components.py",            "DropZone, DataPanel, LineChart"),
+        ("ui/theme.py",                 "Color palette, styled widget factories"),
+        ("ui/inference_window.py",      "Inference popup"),
+        ("ui/health_window.py",         "This health check"),
+        ("eval/",                        "Evaluation module directory"),
+        ("eval/__init__.py",             "Evaluation module exports"),
+        ("eval/harness.py",             "Perplexity, reasoning accuracy"),
+        ("start.py",                    "Entry point"),
+        ("requirements.txt",            "Dependencies"),
     ]
-    
-    OPTIONAL_FILES = [
-        ("mamba_kernel.cpp",      "C++ Mamba kernel (optional)"),
-        ("reflector_kernel.cpp",   "C++ reflector kernel (optional)"),
-    ]
+
+    OPTIONAL_FILES = []
 
     def __init__(self, parent):
         super().__init__(parent)

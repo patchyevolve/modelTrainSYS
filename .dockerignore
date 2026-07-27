@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+.git
+*.so
+build/
+trained_models/
+inference_results/
+savedconfig/
+tmp*
+*.pt
+*.tok
+*.bpe
+.DS_Store
