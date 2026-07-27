@@ -29,3 +29,8 @@ colab_train.ipynb
 # OS
 .DS_Store
 Thumbs.db
+
+# Random assets / db
+randomDATA/
+project_context.db
+*.cpython-*.so

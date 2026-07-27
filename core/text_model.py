@@ -45,6 +45,8 @@ def save_lm(model, tokenizer, config: Dict,
             files_trained_on: Optional[list] = None,
             resume_count: int = 0) -> None:
     torch = _torch()
+    if hasattr(model, "module"):  # unwrap DataParallel/DDP
+        model = model.module
     safe_cfg = dict(config)
     if hasattr(model, "backbone") and hasattr(model.backbone, "blocks"):
         safe_cfg["num_layers"] = len(model.backbone.blocks)

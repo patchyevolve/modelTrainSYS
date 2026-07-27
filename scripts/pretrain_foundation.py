@@ -228,6 +228,9 @@ def train_foundation(
             dropout=0.05,
         ).to(device)
         model.load_state_dict(ckpt["model_state_dict"])
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            model = torch.nn.DataParallel(model)
         start_epoch = ckpt.get("epoch", 0) + 1
         best_val = ckpt.get("best_val", float("inf"))
         opt = torch.optim.AdamW(model.parameters(), lr=ckpt.get("lr", 0.001))
@@ -354,6 +357,12 @@ def train_foundation(
     print(f"    {n_train} train / {n_val} val ({total_batches} batches/epoch)\n")
     del tokens_tensor, full_dataset
 
+    # ── Multi-GPU setup ───────────────────────────────────────────────────
+    num_gpus = torch.cuda.device_count()
+    use_dp = num_gpus > 1 and device.startswith("cuda")
+    if use_dp:
+        print(f"  Using {num_gpus} GPUs with DataParallel")
+
     # ── Build model ───────────────────────────────────────────────────────
     if model is None:
         actual_vocab = tokenizer.vocab_size_real if tokenizer else vocab_size
@@ -362,6 +371,8 @@ def train_foundation(
             num_heads=heads, n_kv_heads=max(1, heads // 4),
             max_seq=seq_len * 4, dropout=0.05,
         ).to(device)
+        if use_dp:
+            model = torch.nn.DataParallel(model)
         opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
 
