@@ -78,6 +78,54 @@ MATH_TOPICS = [
      lambda p,n: f"{p*n/100:.1f}"),
 ]
 
+CODE_TOPICS = [
+    # Python one-liners
+    ("Write a Python function that returns the square of a number",
+     lambda: "def square(x): return x * x",
+     lambda: "def square(x): return x * x"),
+    ("Write a Python function that checks if a number is even",
+     lambda: "def is_even(n): return n % 2 == 0",
+     lambda: "def is_even(n): return n % 2 == 0"),
+    ("Write a Python function that finds the maximum of two numbers",
+     lambda: "def max_of_two(a, b): return a if a > b else b",
+     lambda: "def max_of_two(a, b): return a if a > b else b"),
+    ("Write a Python function that reverses a string",
+     lambda: "def reverse_string(s): return s[::-1]",
+     lambda: "def reverse_string(s): return s[::-1]"),
+    ("Write a Python function that counts vowels in a string",
+     lambda: "def count_vowels(s): return sum(1 for c in s.lower() if c in 'aeiou')",
+     lambda: "def count_vowels(s): return sum(1 for c in s.lower() if c in 'aeiou')"),
+    ("Write a Python function that returns the factorial of n",
+     lambda: "def factorial(n): return 1 if n <= 1 else n * factorial(n - 1)",
+     lambda: "def factorial(n): return 1 if n <= 1 else n * factorial(n - 1)"),
+    ("Write a Python function that checks if a string is a palindrome",
+     lambda: "def is_palindrome(s): return s == s[::-1]",
+     lambda: "def is_palindrome(s): return s == s[::-1]"),
+    ("Write a Python function that returns the nth Fibonacci number",
+     lambda: "def fib(n): a, b = 0, 1; [a, b := b, a + b for _ in range(n)]; return a",
+     lambda: "def fib(n):\n    a, b = 0, 1\n    for _ in range(n): a, b = b, a + b\n    return a"),
+    # Code explanation
+    ("What does len([1, 2, 3]) return?",
+     lambda: "len() returns the number of items in a list. [1, 2, 3] has 3 elements, so it returns 3.",
+     lambda: "3"),
+    ("What does sorted([3, 1, 2]) return?",
+     lambda: "sorted() returns a new sorted list. [3, 1, 2] sorted ascending is [1, 2, 3].",
+     lambda: "[1, 2, 3]"),
+    ("What does 'hello world'.split() do?",
+     lambda: "split() with no argument splits on whitespace. 'hello world' becomes ['hello', 'world'].",
+     lambda: "['hello', 'world']"),
+    # Bug finding
+    ("What is wrong with: for i in range(10): print(i",
+     lambda: "The code has a syntax error: missing closing parenthesis. It should be: for i in range(10): print(i)",
+     lambda: "Missing closing parenthesis on print()"),
+    ("What is wrong with: def add(x, y): return x + y; print(add(5))",
+     lambda: "The function add() takes 2 arguments but only 1 is provided. It should be: print(add(5, 3))",
+     lambda: "Missing second argument to add()"),
+    ("What is wrong with: x = [1, 2, 3]; print(x[3])",
+     lambda: "List index out of range. x has indices 0, 1, 2. x[3] doesn't exist. Accessing x[2] gives 3.",
+     lambda: "IndexError: list index out of range"),
+]
+
 REASONING_TOPICS = [
     ("What is the capital of {country}?",
      lambda country: f"The capital of {country} is a well-known geographical fact. It is the political and administrative center.",
@@ -130,6 +178,16 @@ def generate_math_qa(count: int = 300) -> List[dict]:
             if check(title):
                 examples.append(fill(title, reason_fn, answer_fn))
                 break
+    return examples
+
+
+def generate_code_qa(count: int = 200) -> List[dict]:
+    rng = random.Random(13)
+    examples = []
+    for i in range(count):
+        topic = rng.choice(CODE_TOPICS)
+        title, reason_fn, answer_fn = topic
+        examples.append({"question": title, "steps": reason_fn(), "answer": answer_fn()})
     return examples
 
 
@@ -231,13 +289,14 @@ def auto_finetune(
         )
     else:
         # Generate Q&A data
-        print(f"\n  Generating {generate_count} math + knowledge Q&A examples...")
+        print(f"\n  Generating {generate_count} math + code + knowledge Q&A examples...")
         math_qa = generate_math_qa(generate_count)
-        know_qa = generate_knowledge_qa(generate_count // 2)
-        all_qa = math_qa + know_qa
+        code_qa = generate_code_qa(generate_count // 2)
+        know_qa = generate_knowledge_qa(generate_count // 3)
+        all_qa = math_qa + code_qa + know_qa
         rng = random.Random(42)
         rng.shuffle(all_qa)
-        print(f"    {len(math_qa)} math + {len(know_qa)} knowledge = {len(all_qa)} total")
+        print(f"    {len(math_qa)} math + {len(code_qa)} code + {len(know_qa)} knowledge = {len(all_qa)} total")
         save_qa_data(all_qa, str(data_file))
 
         print(f"\n  Building template pipeline...")

@@ -32,5 +32,7 @@ Thumbs.db
 
 # Random assets / db
 randomDATA/
-project_context.db
+*.db
+*.sqlite
+*.sqlite3
 *.cpython-*.so
